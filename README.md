@@ -7,7 +7,12 @@ camera + heat stats overlaid, a **big red ABORT** per printer, and a clean contr
 - **Printer 1 — Elegoo Centauri Carbon** @ `192.168.10.153` (Elegoo **SDCP** protocol)
 - **Printer 2 — Elegoo OrangeStorm Giga** @ `192.168.10.119` (Klipper / **Moonraker**)
 
-Both printers are hard-coded — no setup wizard needed. Zero npm dependencies.
+Zero npm dependencies. The values above are just defaults — **everything is editable in
+the app** from the **Settings** page (gear icon, top right): printer IPs, names, drivers,
+camera URLs, the Obico ML API address, the file-library folder, and more. Your changes
+save to `config.local.json` and most apply live (printer connection changes rebuild that
+printer on the fly; only a port/host change needs a restart). You never have to edit
+`server.js`.
 
 ---
 
@@ -58,8 +63,9 @@ sends Stop (SDCP `Cmd 130`) or Moonraker `print/cancel`.
 ## If something needs adjusting against the real hardware
 
 I built the drivers from the published SDCP and Moonraker specs, but I couldn't test against
-your actual printers. If a value looks off, these are the only knobs you'd touch — all at the
-top of **`server.js`** in the `CONFIG` block:
+your actual printers. If a value looks off, every knob below is editable from the **Settings**
+page in the app (gear icon) — you don't need to open `server.js`. (They also still live in the
+`CONFIG` block at the top of `server.js` as the defaults, if you prefer.)
 
 - **Centauri camera shows "No signal"?** The Centauri permits only **one** video stream at
   a time. If the ELEGOO app or slicer is open with the camera live, it owns that single slot

@@ -16,13 +16,17 @@ pill and switch it to Notify/Auto/Schedule when you're ready.
 You only have to do one new thing to turn it on: **stand up the ML API container** and
 point the console at it.
 
-> **The Anvil needs one extra setting.** The Centauri (SDCP) has no direct snapshot URL
-> the way the Giga does, so the console exposes the frame itself at
-> `/<console>/api/0/snapshot` (it grabs a still off the shared camera hub, so it never
-> knocks out the live feed). For the ML API to fetch that, set **`CONFIG.SELF_BASE_URL`**
-> (or the `SELF_BASE_URL` env var) to the address the ML API box can reach the console at,
-> e.g. `http://192.168.10.50:8080`. Until that's set the Anvil's pill says
-> *"set SELF_BASE_URL to enable."* The Giga needs nothing extra.
+> **One Obico server handles both printers — you do not need a second one.** The ML API is
+> stateless: it just scores whatever image it's handed, so the single box at
+> `192.168.10.168:3333` watches the Forge *and* the Anvil at once.
+>
+> **The Anvil needs no manual setup.** The Centauri (SDCP) has no direct snapshot URL the
+> way the Giga does, so the console exposes the frame itself at `/<console>/api/0/snapshot`
+> (it grabs a still off the shared camera hub, so it never knocks out the live feed). The
+> console **auto-detects its own LAN address** and hands that to the ML API, so as long as
+> the Obico box is on the same network it just works — nothing to configure. (You only need
+> to set a **Public URL** in **Settings** if you want the phone *Abort* button to work from
+> *outside* your home network; on your own wifi the auto address already covers it.)
 
 ---
 

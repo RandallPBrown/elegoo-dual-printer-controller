@@ -1,2 +1,3 @@
 node_modules/
 spaghetti.settings.json
+config.local.json

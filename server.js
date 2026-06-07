@@ -18,6 +18,7 @@ const fs    = require('fs');
 const path  = require('path');
 const crypto = require('crypto');
 const util  = require('util');
+const os    = require('os');
 
 /* =============================== CONFIG =================================== */
 
@@ -132,6 +133,113 @@ const CONFIG = {
     httpTimeoutMs: 15000,
   },
 };
+
+/* ========================================================================== */
+/*  In-app configuration (config.local.json)                                  */
+/*  Everything above is just DEFAULTS. The Settings page in the UI writes a    */
+/*  config.local.json that is merged over these on boot, so the whole app can  */
+/*  be configured from the browser — no editing this file required.           */
+/* ========================================================================== */
+
+const CONFIG_LOCAL_PATH = path.join(__dirname, 'config.local.json');
+
+// First non-internal IPv4 of this machine, e.g. "192.168.10.50". Used to build the
+// console's own URL automatically so the Obico ML API (on the LAN) can fetch the
+// Centauri snapshot without anyone having to type an address.
+function lanIp() {
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const a of ifs[name] || []) {
+      if (a.family === 'IPv4' && !a.internal) return a.address;
+    }
+  }
+  return null;
+}
+function lanBase() { const ip = lanIp(); return ip ? 'http://' + ip + ':' + CONFIG.PORT : null; }
+// The console base the ML API / a same-network phone can reach. Prefers an explicit
+// public URL (for off-network phone Abort) but falls back to the auto LAN address.
+function consoleBase() { return (CONFIG.SELF_BASE_URL && String(CONFIG.SELF_BASE_URL).trim()) || lanBase() || ''; }
+
+// Merge a saved partial config over the live CONFIG, in place (so references held by
+// drivers/watchdogs stay valid). Only known, editable fields are applied.
+function mergeLocalConfig(j) {
+  if (!j || typeof j !== 'object') return;
+  if (j.console && typeof j.console === 'object') {
+    if (Number.isFinite(+j.console.port)) CONFIG.PORT = +j.console.port;
+    if (typeof j.console.host === 'string' && j.console.host) CONFIG.HOST = j.console.host;
+    if ('publicUrl' in j.console) CONFIG.SELF_BASE_URL = j.console.publicUrl ? String(j.console.publicUrl).trim() : null;
+  }
+  if (j.ai && typeof j.ai === 'object') {
+    const A = CONFIG.SPAGHETTI;
+    if (typeof j.ai.mlApi === 'string') A.mlApi = j.ai.mlApi.trim();
+    if (Number.isFinite(+j.ai.pollSeconds)) A.pollSeconds = Math.max(5, Math.min(600, +j.ai.pollSeconds));
+    if (Number.isFinite(+j.ai.startGraceSec)) A.startGraceSec = Math.max(0, Math.min(3600, +j.ai.startGraceSec));
+    if (Number.isFinite(+j.ai.httpTimeoutMs)) A.httpTimeoutMs = Math.max(2000, Math.min(60000, +j.ai.httpTimeoutMs));
+    if (j.ai.notify && typeof j.ai.notify === 'object' && typeof j.ai.notify.ntfyTopic === 'string') {
+      A.notify = A.notify || {}; A.notify.ntfyTopic = j.ai.notify.ntfyTopic.trim();
+    }
+  }
+  if (j.files && typeof j.files === 'object') {
+    const F = CONFIG.FILE_BROWSER;
+    if ('enabled' in j.files) F.enabled = !!j.files.enabled;
+    if ('writable' in j.files) F.writable = !!j.files.writable;
+    if (typeof j.files.label === 'string' && j.files.label) F.label = j.files.label;
+    if (typeof j.files.root === 'string' && j.files.root) F.root = j.files.root;
+  }
+  if (Array.isArray(j.printers)) {
+    j.printers.forEach((pp, i) => {
+      const P = CONFIG.PRINTERS[i];
+      if (!P || !pp || typeof pp !== 'object') return;
+      const str = (k) => { if (typeof pp[k] === 'string') P[k] = pp[k].trim(); };
+      const strOrNull = (k) => { if (k in pp) P[k] = (pp[k] == null || pp[k] === '') ? null : String(pp[k]).trim(); };
+      ['name', 'nickname', 'model', 'ip', 'webcamUrl', 'chamberSensor'].forEach(str);
+      if (typeof pp.driver === 'string' && (pp.driver === 'sdcp' || pp.driver === 'moonraker')) P.driver = pp.driver;
+      if (Number.isFinite(+pp.moonrakerPort)) P.moonrakerPort = +pp.moonrakerPort;
+      if (Number.isFinite(+pp.sdcpWsPort)) P.sdcpWsPort = +pp.sdcpWsPort;
+      strOrNull('moonrakerBase'); strOrNull('mainboardId');
+      if ('forceVideoHost' in pp) P.forceVideoHost = !!pp.forceVideoHost;
+      if (pp.spaghetti && typeof pp.spaghetti === 'object') {
+        P.spaghetti = P.spaghetti || {};
+        if ('snapshotUrl' in pp.spaghetti) P.spaghetti.snapshotUrl = pp.spaghetti.snapshotUrl ? String(pp.spaghetti.snapshotUrl).trim() : null;
+      }
+    });
+  }
+}
+try {
+  const raw = fs.readFileSync(CONFIG_LOCAL_PATH, 'utf8');
+  mergeLocalConfig(JSON.parse(raw));
+  console.log('[config] loaded config.local.json');
+} catch (e) { if (e.code !== 'ENOENT') console.log('[config] config.local.json unreadable:', e.message); }
+
+// The current editable configuration, as the Settings page sees it.
+function editableConfig() {
+  return {
+    console: { port: CONFIG.PORT, host: CONFIG.HOST, publicUrl: CONFIG.SELF_BASE_URL || '' },
+    lanBase: lanBase(),                 // read-only hint
+    consoleBase: consoleBase(),         // read-only hint (what the ML API / phone uses)
+    ai: {
+      mlApi: CONFIG.SPAGHETTI.mlApi || '',
+      pollSeconds: CONFIG.SPAGHETTI.pollSeconds,
+      startGraceSec: CONFIG.SPAGHETTI.startGraceSec,
+      httpTimeoutMs: CONFIG.SPAGHETTI.httpTimeoutMs,
+      notify: { ntfyTopic: (CONFIG.SPAGHETTI.notify && CONFIG.SPAGHETTI.notify.ntfyTopic) || '' },
+    },
+    files: { enabled: !!CONFIG.FILE_BROWSER.enabled, writable: !!CONFIG.FILE_BROWSER.writable, label: CONFIG.FILE_BROWSER.label, root: CONFIG.FILE_BROWSER.root },
+    printers: CONFIG.PRINTERS.map((P) => ({
+      name: P.name, nickname: P.nickname || '', model: P.model || '', ip: P.ip, driver: P.driver,
+      moonrakerPort: P.moonrakerPort || 7125, moonrakerBase: P.moonrakerBase || '',
+      webcamUrl: P.webcamUrl || '', chamberSensor: P.chamberSensor || '',
+      sdcpWsPort: P.sdcpWsPort || 3030, mainboardId: P.mainboardId || '', forceVideoHost: P.forceVideoHost !== false,
+      spaghetti: { snapshotUrl: (P.spaghetti && P.spaghetti.snapshotUrl) || '' },
+    })),
+  };
+}
+function saveLocalConfig() {
+  const snap = editableConfig();
+  delete snap.lanBase; delete snap.consoleBase;
+  try { fs.writeFileSync(CONFIG_LOCAL_PATH, JSON.stringify(snap, null, 2)); return true; }
+  catch (e) { console.log('[config] save failed:', e.message); return false; }
+}
 
 /* ========================================================================== */
 /*  Helpers                                                                   */
@@ -632,6 +740,7 @@ class MoonrakerDriver {
   async videoUrl() { return this.webcamUrl; }
   async cameraInfo() { return { ok: true, url: this.webcamUrl, ack: 0, reason: '' }; }
   invalidateVideo() {}
+  dispose() {}
 }
 
 /* ========================================================================== */
@@ -670,9 +779,19 @@ class SdcpDriver {
       this.lastStatus = blankStatus({ detail: 'Node too old for SDCP' });
       return;
     }
+    this._disposed = false;
     this._discoverThenConnect();
-    setInterval(() => { if (this.connected) this._send(SDCP_CMD.STATUS, {}); }, 4000);
-    setInterval(() => { if (this.connected && this.ws) { try { this.ws.send('ping'); } catch {} } }, 5000);
+    this._statusTimer = setInterval(() => { if (this.connected) this._send(SDCP_CMD.STATUS, {}); }, 4000);
+    this._pingTimer = setInterval(() => { if (this.connected && this.ws) { try { this.ws.send('ping'); } catch {} } }, 5000);
+  }
+
+  // Tear down sockets + timers so this driver can be replaced (used when the Settings
+  // page changes this printer's connection details and we rebuild it live).
+  dispose() {
+    this._disposed = true;
+    clearInterval(this._statusTimer); clearInterval(this._pingTimer); clearTimeout(this._reconnectT);
+    try { if (this.ws) this.ws.close(); } catch {}
+    this.ws = null; this.connected = false;
   }
 
   // UDP broadcast discovery to learn the MainboardID, then open the WebSocket.
@@ -728,6 +847,7 @@ class SdcpDriver {
     this.connected = false;
     try { if (this.ws) this.ws.close(); } catch {}
     this.ws = null;
+    if (this._disposed) return;                 // replaced by a rebuild — don't reconnect
     this.lastStatus = blankStatus({ detail: 'offline (reconnecting)' });
     clearTimeout(this._reconnectT);
     this._reconnectT = setTimeout(() => this._discoverThenConnect(), 5000);
@@ -1022,6 +1142,33 @@ const drivers = CONFIG.PRINTERS.map((p) => (p.driver === 'sdcp' ? new SdcpDriver
 const hubs = CONFIG.PRINTERS.map(() => new MjpegHub());
 hubs.forEach((h, i) => { h.onFail = () => { if (drivers[i].invalidateVideo) drivers[i].invalidateVideo(); }; });
 
+// Rebuild one printer's driver in place after its connection settings change in the
+// Settings page — disposes the old driver (closing sockets/timers), constructs a fresh
+// one from the updated CONFIG.PRINTERS[i], and drops the camera hub's upstream so it
+// re-opens against the new feed. The watchdog indexes drivers[i] at call time, so it
+// picks up the new driver automatically.
+function rebuildPrinter(i) {
+  try { if (drivers[i] && drivers[i].dispose) drivers[i].dispose(); } catch {}
+  const p = CONFIG.PRINTERS[i];
+  drivers[i] = (p.driver === 'sdcp') ? new SdcpDriver(p) : new MoonrakerDriver(p);
+  try { hubs[i]._fail(); } catch {}
+  console.log('[config] rebuilt printer #' + i + ' (' + p.driver + ' ' + p.ip + ')');
+}
+
+// Apply a Settings-page patch: merge it over CONFIG (in place), persist it, and rebuild
+// any printer whose connection details changed so it takes effect without a restart.
+function applyConfig(patch) {
+  const sig = (P) => [P.driver, P.ip, P.moonrakerPort, P.moonrakerBase, P.webcamUrl, P.sdcpWsPort, P.mainboardId, P.forceVideoHost].join('|');
+  const before = CONFIG.PRINTERS.map(sig);
+  const portBefore = CONFIG.PORT, hostBefore = CONFIG.HOST;
+  mergeLocalConfig(patch);
+  saveLocalConfig();
+  CONFIG.PRINTERS.forEach((P, i) => { if (sig(P) !== before[i]) rebuildPrinter(i); });
+  const restartRequired = (CONFIG.PORT !== portBefore || CONFIG.HOST !== hostBefore);
+  Logs.add('system', 'info', 'settings updated via the Settings page' + (restartRequired ? ' (port/host change needs a restart)' : ''));
+  return { ok: true, restartRequired, config: editableConfig() };
+}
+
 // Grab a single fresh JPEG still from a printer's camera, by index. Moonraker has a
 // direct snapshot endpoint (action=snapshot); the Centauri (SDCP, single-stream) is
 // tapped off the shared MJPEG hub so the live feed isn't disturbed. Resolves a Buffer.
@@ -1121,7 +1268,10 @@ function makeWatchdog(idx) {
     if (drv && drv.kind === 'moonraker') {
       return C.snapshotUrl || (drv.webcamUrl ? drv.webcamUrl.replace(/action=stream/i, 'action=snapshot') : '') || '';
     }
-    const base = (CONFIG.SELF_BASE_URL || '').replace(/\/+$/, '');
+    // SDCP (the Anvil): point the ML API at THIS console's snapshot proxy. The base is
+    // auto-detected from the LAN, so no manual setup is needed when the ML box is on the
+    // same network; an explicit public URL (SELF_BASE_URL) overrides it if set.
+    const base = consoleBase().replace(/\/+$/, '');
     return base ? base + '/api/' + idx + '/snapshot' : '';
   }
 
@@ -1129,7 +1279,9 @@ function makeWatchdog(idx) {
   // phone-reachable console address (SELF_BASE_URL); without it we return null and the
   // alert simply ships without buttons (the photo still goes through).
   function buildActions() {
-    const base = (CONFIG.SELF_BASE_URL || '').replace(/\/+$/, '');
+    // Prefer an explicit public URL (works off-network); fall back to the auto LAN base
+    // (works when your phone is on the same wifi/VPN). Either way, no JS editing needed.
+    const base = consoleBase().replace(/\/+$/, '');
     if (!base) return null;
     const abortUrl = base + '/api/' + idx + '/action';
     return 'http, Abort print, ' + abortUrl + ", method=POST, body='" + '{"action":"abort"}' + "', clear=true; view, Open console, " + base;
@@ -1440,6 +1592,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, CONFIG.PRINTERS.map((pr, i) => ({
         id: i, name: pr.name, nickname: pr.nickname || null, model: pr.model, driver: pr.driver, caps: drivers[i].caps,
       })));
+    }
+
+    // Full in-app configuration (the Settings page).
+    if (p === '/api/config' && req.method === 'GET') return sendJson(res, editableConfig());
+    if (p === '/api/config' && req.method === 'POST') {
+      const body = await readBody(req);
+      try { return sendJson(res, applyConfig(body)); }
+      catch (e) { return sendJson(res, { ok: false, error: e.message }, 400); }
     }
 
     // Aggregate watchdog state for all printers (the pills poll this).

@@ -320,7 +320,18 @@
   .logrow .lmsg{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
   .src-obico{color:#7a59c0} .src-control{color:#b3692f} .src-ntfy{color:#2e7d8a} .src-printer{color:#5d7d36} .src-system{color:#8a7a63} .src-camera{color:#9a6a16}
   .lv-warn .lmsg{color:#9a6a16} .lv-error .lmsg{color:var(--danger)}
-  @media (max-width:560px){#grid{grid-template-columns:1fr} .nav-btn .lbl{display:none} .nav-btn{padding:9px 11px}}
+
+  /* ===== Settings page ===== */
+  .cfg-row{display:flex;align-items:center;gap:10px;margin:9px 0;flex-wrap:wrap}
+  .cfg-row label{flex:none;width:150px;font-size:12px;color:var(--ink-dim)}
+  .cfg-row input[type=text],.cfg-row input[type=number],.cfg-row select{flex:1;min-width:150px;background:#fff;border:1px solid var(--line-bright);color:var(--ink);font-family:var(--mono);font-size:12px;padding:8px;border-radius:7px}
+  .cfg-hint{font-size:11px;color:var(--ink-faint);margin:-3px 0 6px 160px;line-height:1.45}
+  .cfg-hint code{background:var(--panel-2);padding:1px 5px;border-radius:4px;font-size:10.5px}
+  .cfg-print{border:1px solid var(--line-bright);border-radius:10px;padding:11px 13px;margin-top:11px;background:var(--panel-2)}
+  .cfg-print h5{margin:0 0 8px;font-size:12.5px;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .cfg-print h5 .tag{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--copper);border:1px solid var(--line-bright);border-radius:5px;padding:2px 6px}
+  .cfg-save{position:sticky;bottom:0;background:linear-gradient(#ffffff00,#fff 30%);padding:14px 0 2px;display:flex;gap:10px;align-items:center}
+  @media (max-width:560px){#grid{grid-template-columns:1fr} .nav-btn .lbl{display:none} .nav-btn{padding:9px 11px} .cfg-row label{width:100%} .cfg-hint{margin-left:0}}
 </style>
 </head>
 <body>
@@ -337,6 +348,7 @@
       <button class="nav-btn" data-view="files"><svg viewBox="0 0 24 24" fill="none"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span class="lbl">3D&nbsp;Files</span></button>
       <button class="nav-btn" id="nav-filament"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg><span class="lbl">Filament</span></button>
       <button class="nav-btn" id="nav-logs"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h11l3 3v13H5V4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 9h6M8 13h8M8 17h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span class="lbl">Logs</span></button>
+      <button class="nav-btn" id="nav-settings"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/><path d="M12 3v2.5M12 18.5V21M4.2 7.5l2.2 1.3M17.6 15.2l2.2 1.3M19.8 7.5l-2.2 1.3M6.4 15.2l-2.2 1.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span class="lbl">Settings</span></button>
     </nav>
   </header>
 
@@ -372,6 +384,7 @@
   <div class="overlay" id="ai-overlay"><div class="modal" id="ai" style="width:min(680px,100%)"></div></div>
   <div class="overlay" id="calib-overlay"><div class="modal" id="calib" style="width:min(900px,100%)"></div></div>
   <div class="overlay" id="logs-overlay"><div class="modal" id="logs" style="width:min(820px,100%)"></div></div>
+  <div class="overlay" id="settings-overlay"><div class="modal" id="settings" style="width:min(760px,100%)"></div></div>
   <div id="toast"></div>
 
 <script>
@@ -958,20 +971,97 @@
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
 
+  /* ---- settings page (full in-app config) ---- */
+  var cfgData=null;
+  function openSettings(){show('settings-overlay');document.getElementById('settings').innerHTML='<div class="modal-head"><div class="t">Settings</div><button class="close" id="set-close">×</button></div><div class="modal-body"><div class="empty">Loading…</div></div>';var cl=document.getElementById('set-close');if(cl)cl.onclick=closeSettings;getJSON('/api/config').then(function(c){cfgData=c;renderSettings();}).catch(function(){document.getElementById('settings').innerHTML='<div class="modal-body"><div class="empty err">Could not load settings.</div></div>';});}
+  function closeSettings(){hide('settings-overlay');}
+  function ti(id,val,type,ph){return '<input id="'+id+'" type="'+(type||'text')+'"'+(ph?(' placeholder="'+ph+'"'):'')+' value="'+escAttr(val)+'">';}
+  function escAttr(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
+  function yn(id,on){return '<select id="'+id+'"><option value="yes"'+(on?' selected':'')+'>Yes</option><option value="no"'+(on?'':' selected')+'>No</option></select>';}
+  function renderSettings(){
+    var c=cfgData||{};var cn=c.console||{},ai=c.ai||{},fl=c.files||{},prs=c.printers||[];
+    var snapEx=(c.consoleBase||c.lanBase||'http://&lt;this-console&gt;')+'/api/0/snapshot';
+    var h=''+
+      '<div class="modal-head"><div><div class="t">Settings</div><div class="sub">Everything is editable here — no need to touch server.js</div></div><button class="close" id="set-close">×</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="section"><h4>Console</h4>'+
+          '<div class="cfg-row"><label>Public URL</label>'+ti('set-pub',cn.publicUrl,'text','https://forge.example.com (optional)')+'</div>'+
+          '<div class="cfg-hint">Only needed to <b>Abort from your phone when you’re away from home</b>. On your own wifi the auto address <code>'+escAttr(c.lanBase||'(detecting…)')+'</code> already works. ⚠ A public URL exposes an unauthenticated abort endpoint — put it behind a VPN/auth if that matters.</div>'+
+          '<div class="cfg-row"><label>Port</label>'+ti('set-port',cn.port,'number')+'<label style="width:auto">Host</label>'+ti('set-host',cn.host)+'</div>'+
+          '<div class="cfg-hint">Changing port/host needs a server restart to take effect.</div>'+
+        '</div>'+
+        '<div class="section"><h4>AI watchdog (Obico)</h4>'+
+          '<div class="cfg-row"><label>ML API URL</label>'+ti('set-mlapi',ai.mlApi,'text','http://192.168.10.168:3333')+'</div>'+
+          '<div class="cfg-hint">Your one self-hosted Obico ML API — it scores <b>both</b> printers, no second server needed. The Anvil’s snapshot is served by this console at <code>'+snapEx+'</code> and fetched automatically.</div>'+
+          '<div class="cfg-row"><label>Poll seconds</label>'+ti('set-poll',ai.pollSeconds,'number')+'<label style="width:auto">Start grace (s)</label>'+ti('set-grace',ai.startGraceSec,'number')+'</div>'+
+          '<div class="cfg-row"><label>Default ntfy topic</label>'+ti('set-ntfy',(ai.notify||{}).ntfyTopic,'text','https://ntfy.sh/my-alerts')+'</div>'+
+          '<div class="cfg-hint">Per-printer mode, sensitivity, dead zones &amp; ntfy topic live on each card’s <b>AI</b> pill. This is just the shared model + defaults.</div>'+
+        '</div>'+
+        '<div class="section"><h4>3D Files library</h4>'+
+          '<div class="cfg-row"><label>Folder (root)</label>'+ti('set-froot',fl.root,'text','\\\\Server\\Share\\3D Files or D:\\3D Files')+'</div>'+
+          '<div class="cfg-row"><label>Label</label>'+ti('set-flabel',fl.label)+'<label style="width:auto">Browsing</label>'+yn('set-fen',fl.enabled)+'<label style="width:auto">Editing</label>'+yn('set-fwr',fl.writable)+'</div>'+
+        '</div>';
+    prs.forEach(function(p,i){
+      h+='<div class="cfg-print"><h5>Printer '+i+' <span class="tag">'+(p.driver||'')+'</span></h5>'+
+        '<div class="cfg-row"><label>Nickname</label>'+ti('p'+i+'-nick',p.nickname,'text','The Anvil')+'<label style="width:auto">Name</label>'+ti('p'+i+'-name',p.name)+'</div>'+
+        '<div class="cfg-row"><label>Model</label>'+ti('p'+i+'-model',p.model)+'</div>'+
+        '<div class="cfg-row"><label>IP address</label>'+ti('p'+i+'-ip',p.ip,'text','192.168.10.x')+'<label style="width:auto">Driver</label><select id="p'+i+'-driver"><option value="sdcp"'+(p.driver==='sdcp'?' selected':'')+'>Elegoo SDCP (Centauri)</option><option value="moonraker"'+(p.driver==='moonraker'?' selected':'')+'>Klipper/Moonraker (Giga)</option></select></div>'+
+        '<div class="cfg-row"><label>Webcam URL</label>'+ti('p'+i+'-webcam',p.webcamUrl,'text','http://ip/webcam/?action=stream')+'</div>'+
+        '<div class="cfg-hint">Moonraker only — the MJPEG stream URL. SDCP discovers its camera automatically.</div>'+
+        '<div class="cfg-row"><label>Moonraker port</label>'+ti('p'+i+'-mport',p.moonrakerPort,'number')+'<label style="width:auto">Base URL</label>'+ti('p'+i+'-mbase',p.moonrakerBase,'text','auto')+'</div>'+
+        '<div class="cfg-row"><label>Chamber sensor</label>'+ti('p'+i+'-cham',p.chamberSensor,'text','chamber')+'</div>'+
+        '<div class="cfg-row"><label>SDCP WS port</label>'+ti('p'+i+'-wsport',p.sdcpWsPort,'number')+'<label style="width:auto">Mainboard ID</label>'+ti('p'+i+'-mbid',p.mainboardId,'text','auto-discover')+'</div>'+
+        '<div class="cfg-row"><label>AI snapshot URL</label>'+ti('p'+i+'-snap',(p.spaghetti||{}).snapshotUrl,'text','leave blank = automatic')+'</div>'+
+        '<div class="cfg-hint">Advanced — override only if auto-detection picks the wrong camera frame.</div>'+
+      '</div>';
+    });
+    h+='<div class="cfg-save"><button class="btn primary" id="set-save">Save settings</button><button class="btn ghost" id="set-cancel">Cancel</button><div class="muted" style="flex:1;text-align:right">Saved to <code>config.local.json</code></div></div>'+
+      '</div>';
+    document.getElementById('settings').innerHTML=h;
+    document.getElementById('set-close').onclick=closeSettings;
+    document.getElementById('set-cancel').onclick=closeSettings;
+    document.getElementById('set-save').onclick=saveSettings;
+  }
+  function gv(id){var e=document.getElementById(id);return e?e.value.trim():'';}
+  function gnum(id){var v=gv(id);return v===''?undefined:Number(v);}
+  function gyn(id){var e=document.getElementById(id);return e?e.value==='yes':undefined;}
+  function collectSettings(){
+    var prs=(cfgData.printers||[]).map(function(p,i){return {
+      name:gv('p'+i+'-name'),nickname:gv('p'+i+'-nick'),model:gv('p'+i+'-model'),ip:gv('p'+i+'-ip'),
+      driver:gv('p'+i+'-driver'),webcamUrl:gv('p'+i+'-webcam'),moonrakerPort:gnum('p'+i+'-mport'),
+      moonrakerBase:gv('p'+i+'-mbase'),chamberSensor:gv('p'+i+'-cham'),sdcpWsPort:gnum('p'+i+'-wsport'),
+      mainboardId:gv('p'+i+'-mbid'),spaghetti:{snapshotUrl:gv('p'+i+'-snap')}
+    };});
+    return {
+      console:{publicUrl:gv('set-pub'),port:gnum('set-port'),host:gv('set-host')},
+      ai:{mlApi:gv('set-mlapi'),pollSeconds:gnum('set-poll'),startGraceSec:gnum('set-grace'),notify:{ntfyTopic:gv('set-ntfy')}},
+      files:{root:gv('set-froot'),label:gv('set-flabel'),enabled:gyn('set-fen'),writable:gyn('set-fwr')},
+      printers:prs
+    };
+  }
+  function saveSettings(){var btn=document.getElementById('set-save');if(btn){btn.disabled=true;btn.textContent='Saving…';}
+    post('/api/config',collectSettings()).then(function(r){
+      if(r&&r.ok){toast('Settings saved','ok');
+        if(r.restartRequired){confirmBox({title:'Restart needed',okText:'Got it',msg:'Port/Host changes take effect the next time the server (node server.js) restarts. Everything else is already live.'}).then(function(){closeSettings();});}
+        else{setTimeout(function(){location.reload();},650);}
+      }else{toast((r&&r.error)||'Save failed','err');if(btn){btn.disabled=false;btn.textContent='Save settings';}}
+    }).catch(function(){toast('Save failed','err');if(btn){btn.disabled=false;btn.textContent='Save settings';}});
+  }
+
   /* ---- views + wiring ---- */
   function showView(v){document.querySelectorAll('.view').forEach(function(x){x.classList.remove('on');});document.getElementById('view-'+v).classList.add('on');
     document.querySelectorAll('.nav-btn[data-view]').forEach(function(b){b.classList.toggle('on',b.dataset.view===v);});
     document.getElementById('tb-dashboard').style.display=v==='dashboard'?'flex':'none';
     document.getElementById('tb-files').style.display=v==='files'?'flex':'none';
     if(v==='files'&&!filesInit){filesInit=true;getJSON('/api/files/config').then(function(cfg){filesWritable=!!cfg.writable;document.getElementById('files-newfolder').style.display=filesWritable?'inline-flex':'none';}).catch(function(){});loadFiles('');}}
-  document.getElementById('nav').addEventListener('click',function(e){var b=e.target.closest('.nav-btn');if(!b)return;if(b.id==='nav-filament'){openFilament();return;}if(b.id==='nav-logs'){openLogs();return;}if(b.dataset.view)showView(b.dataset.view);});
+  document.getElementById('nav').addEventListener('click',function(e){var b=e.target.closest('.nav-btn');if(!b)return;if(b.id==='nav-filament'){openFilament();return;}if(b.id==='nav-logs'){openLogs();return;}if(b.id==='nav-settings'){openSettings();return;}if(b.dataset.view)showView(b.dataset.view);});
   document.getElementById('cols').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;[].forEach.call(this.children,function(x){x.classList.remove('on');});b.classList.add('on');grid.className=b.dataset.cols==='auto'?'':('cols-'+b.dataset.cols);});
   document.getElementById('reconnect-all').addEventListener('click',function(){Object.keys(cards).forEach(connect);});
   document.getElementById('files-refresh').addEventListener('click',function(){loadFiles(filesCwd);});
   document.getElementById('files-search').addEventListener('input',drawTiles);
   document.getElementById('files-newfolder').addEventListener('click',function(){promptText({title:'New folder',desc:'Created in '+(filesCwd?filesCwd:'3D Files'),placeholder:'Folder name',okText:'Create'}).then(function(name){if(!name)return;post('/api/files/mkdir',{path:filesCwd,name:name}).then(function(r){if(r.ok){toast('Folder created','ok');loadFiles(filesCwd);}else toast(r.error||'Could not create folder','err');});});});
-  ['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs'].forEach(function(n){document.getElementById(n+'-overlay').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){if(logsTimer){clearInterval(logsTimer);logsTimer=null;}['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs'].forEach(function(n){hide(n+'-overlay');});}});
+  ['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs','settings'].forEach(function(n){document.getElementById(n+'-overlay').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){if(logsTimer){clearInterval(logsTimer);logsTimer=null;}['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs','settings'].forEach(function(n){hide(n+'-overlay');});}});
 
   getJSON('/api/printers').then(function(list){document.getElementById('total-count').textContent=list.length;
     list.forEach(function(p){printers[p.id]=p;buildCard(p);});pollAll();setInterval(pollAll,1500);pollSpag();setInterval(pollSpag,2000);

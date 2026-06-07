@@ -192,12 +192,21 @@ function mergeLocalConfig(j) {
       if (!P || !pp || typeof pp !== 'object') return;
       const str = (k) => { if (typeof pp[k] === 'string') P[k] = pp[k].trim(); };
       const strOrNull = (k) => { if (k in pp) P[k] = (pp[k] == null || pp[k] === '') ? null : String(pp[k]).trim(); };
-      ['name', 'nickname', 'model', 'ip', 'webcamUrl', 'chamberSensor'].forEach(str);
+      // identity/display fields apply to any driver
+      ['name', 'nickname', 'model', 'ip'].forEach(str);
       if (typeof pp.driver === 'string' && (pp.driver === 'sdcp' || pp.driver === 'moonraker')) P.driver = pp.driver;
-      if (Number.isFinite(+pp.moonrakerPort)) P.moonrakerPort = +pp.moonrakerPort;
-      if (Number.isFinite(+pp.sdcpWsPort)) P.sdcpWsPort = +pp.sdcpWsPort;
-      strOrNull('moonrakerBase'); strOrNull('mainboardId');
-      if ('forceVideoHost' in pp) P.forceVideoHost = !!pp.forceVideoHost;
+      // Apply only the connection fields relevant to the EFFECTIVE driver, so the
+      // Settings form's placeholder defaults for the other driver (e.g. moonrakerPort
+      // on an SDCP printer) never pollute the config or trip a needless rebuild.
+      if (P.driver === 'moonraker') {
+        ['webcamUrl', 'chamberSensor'].forEach(str);
+        if (Number.isFinite(+pp.moonrakerPort)) P.moonrakerPort = +pp.moonrakerPort;
+        strOrNull('moonrakerBase');
+      } else {
+        if (Number.isFinite(+pp.sdcpWsPort)) P.sdcpWsPort = +pp.sdcpWsPort;
+        strOrNull('mainboardId');
+        if ('forceVideoHost' in pp) P.forceVideoHost = !!pp.forceVideoHost;
+      }
       if (pp.spaghetti && typeof pp.spaghetti === 'object') {
         P.spaghetti = P.spaghetti || {};
         if ('snapshotUrl' in pp.spaghetti) P.spaghetti.snapshotUrl = pp.spaghetti.snapshotUrl ? String(pp.spaghetti.snapshotUrl).trim() : null;
@@ -1158,7 +1167,12 @@ function rebuildPrinter(i) {
 // Apply a Settings-page patch: merge it over CONFIG (in place), persist it, and rebuild
 // any printer whose connection details changed so it takes effect without a restart.
 function applyConfig(patch) {
-  const sig = (P) => [P.driver, P.ip, P.moonrakerPort, P.moonrakerBase, P.webcamUrl, P.sdcpWsPort, P.mainboardId, P.forceVideoHost].join('|');
+  // Only the connection fields that matter to a printer's CURRENT driver count toward a
+  // rebuild — so re-saving an SDCP printer (whose form carries Moonraker placeholders) or
+  // tweaking a nickname never needlessly tears down and reconnects a working driver.
+  const sig = (P) => P.driver === 'moonraker'
+    ? ['m', P.ip || '', P.moonrakerPort || '', P.moonrakerBase || '', P.webcamUrl || ''].join('|')
+    : ['s', P.ip || '', P.sdcpWsPort || '', P.mainboardId || '', P.forceVideoHost !== false].join('|');
   const before = CONFIG.PRINTERS.map(sig);
   const portBefore = CONFIG.PORT, hostBefore = CONFIG.HOST;
   mergeLocalConfig(patch);

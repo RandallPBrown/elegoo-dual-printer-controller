@@ -940,29 +940,45 @@
     document.getElementById('fil-close').onclick=function(){hide('filament-overlay');};show('filament-overlay');}
 
   /* ---- master logs modal ---- */
-  var logsTimer=null, logSource='all';
+  // The feed is OFF by default: only critical events (errors, aborts, alerts, ntfy) are
+  // captured in the background. Press "Start live feed" to also capture/stream routine
+  // activity — that's the only time the page polls the server or the server keeps noise.
+  var logsTimer=null, logSource='all', logsLive=false;
   function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-  function openLogs(){show('logs-overlay');renderLogsShell();loadLogs();clearInterval(logsTimer);logsTimer=setInterval(loadLogs,2500);}
-  function closeLogs(){hide('logs-overlay');clearInterval(logsTimer);logsTimer=null;}
+  function openLogs(){show('logs-overlay');renderLogsShell();loadLogs();}
+  function closeLogs(){hide('logs-overlay');stopLogsLive();}
+  function stopLogsLive(){clearInterval(logsTimer);logsTimer=null;if(logsLive){logsLive=false;post('/api/logs/live',{on:false}).catch(function(){});}}
+  function setLogsLive(on){
+    if(on){logsLive=true;post('/api/logs/live',{on:true}).catch(function(){});clearInterval(logsTimer);logsTimer=setInterval(loadLogs,2500);loadLogs();}
+    else{stopLogsLive();}
+    renderLogsShell();loadLogs();
+  }
   function renderLogsShell(){
     var sources=[['all','All'],['obico','AI'],['control','Control'],['ntfy','ntfy'],['printer','Printers'],['system','System']];
     var seg=sources.map(function(s){return '<button data-src="'+s[0]+'" class="'+(logSource===s[0]?'on':'')+'">'+s[1]+'</button>';}).join('');
+    var liveBtn=logsLive
+      ?'<button class="btn" id="logs-live" style="border-color:var(--sage);color:#5d7d36">● Live — Stop</button>'
+      :'<button class="btn primary" id="logs-live">Start live feed</button>';
     document.getElementById('logs').innerHTML=''+
       '<div class="modal-head"><div><div class="t">Logs</div><div class="sub">Obico · Forge Control · printers · notifications</div></div><button class="close" id="logs-close">×</button></div>'+
       '<div class="modal-body">'+
+        '<div class="row" style="gap:9px;margin-bottom:11px">'+liveBtn+'<button class="btn ghost" id="logs-refresh">Refresh</button>'+
+          '<div class="muted" style="flex:1">'+(logsLive?'Capturing everything · updates every 2.5s':'Showing only critical events (errors, aborts, alerts, ntfy). Start the live feed for routine activity.')+'</div></div>'+
         '<div class="seg logs-seg" id="logs-seg">'+seg+'</div>'+
         '<div class="logtable" id="logs-list"><div class="empty">Loading…</div></div>'+
-        '<div class="row" style="margin-top:11px"><div class="muted" style="flex:1">Live · newest at the bottom · updates every 2.5s</div><button class="btn ghost" id="logs-done">Done</button></div>'+
+        '<div class="row" style="margin-top:11px"><div class="muted" style="flex:1">Newest at the bottom</div><button class="btn ghost" id="logs-done">Done</button></div>'+
       '</div>';
     document.getElementById('logs-close').onclick=closeLogs;
     document.getElementById('logs-done').onclick=closeLogs;
+    document.getElementById('logs-refresh').onclick=loadLogs;
+    document.getElementById('logs-live').onclick=function(){setLogsLive(!logsLive);};
     document.getElementById('logs-seg').onclick=function(e){var b=e.target.closest('button[data-src]');if(!b)return;logSource=b.dataset.src;renderLogsShell();loadLogs();};
   }
   function loadLogs(){if(!document.getElementById('logs-list'))return;getJSON('/api/logs?limit=400'+(logSource!=='all'?'&source='+encodeURIComponent(logSource):'')).then(renderLogs).catch(function(){});}
   function renderLogs(d){
     var box=document.getElementById('logs-list');if(!box)return;
     var rows=(d&&d.entries)||[];
-    if(!rows.length){box.innerHTML='<div class="empty">No log entries'+(logSource!=='all'?' for this source':'')+' yet.</div>';return;}
+    if(!rows.length){box.innerHTML='<div class="empty">No '+(logsLive?'':'critical ')+'log entries'+(logSource!=='all'?' for this source':'')+' yet.'+(logsLive?'':' Start the live feed to capture routine activity.')+'</div>';return;}
     var atBottom=(box.scrollTop+box.clientHeight>=box.scrollHeight-30);
     box.innerHTML=rows.map(function(e){
       var ts=new Date(e.t).toLocaleTimeString();
@@ -1060,8 +1076,8 @@
   document.getElementById('files-refresh').addEventListener('click',function(){loadFiles(filesCwd);});
   document.getElementById('files-search').addEventListener('input',drawTiles);
   document.getElementById('files-newfolder').addEventListener('click',function(){promptText({title:'New folder',desc:'Created in '+(filesCwd?filesCwd:'3D Files'),placeholder:'Folder name',okText:'Create'}).then(function(name){if(!name)return;post('/api/files/mkdir',{path:filesCwd,name:name}).then(function(r){if(r.ok){toast('Folder created','ok');loadFiles(filesCwd);}else toast(r.error||'Could not create folder','err');});});});
-  ['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs','settings'].forEach(function(n){document.getElementById(n+'-overlay').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){if(logsTimer){clearInterval(logsTimer);logsTimer=null;}['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs','settings'].forEach(function(n){hide(n+'-overlay');});}});
+  ['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs','settings'].forEach(function(n){document.getElementById(n+'-overlay').addEventListener('click',function(e){if(e.target===this){if(n==='logs')stopLogsLive();this.classList.remove('show');}});});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){stopLogsLive();['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs','settings'].forEach(function(n){hide(n+'-overlay');});}});
 
   getJSON('/api/printers').then(function(list){document.getElementById('total-count').textContent=list.length;
     list.forEach(function(p){printers[p.id]=p;buildCard(p);});pollAll();setInterval(pollAll,1500);pollSpag();setInterval(pollSpag,2000);

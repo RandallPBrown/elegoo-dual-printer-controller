@@ -146,14 +146,19 @@ const CONFIG_LOCAL_PATH = path.join(__dirname, 'config.local.json');
 // First non-internal IPv4 of this machine, e.g. "192.168.10.50". Used to build the
 // console's own URL automatically so the Obico ML API (on the LAN) can fetch the
 // Centauri snapshot without anyone having to type an address.
+let _lanIpCache = null, _lanIpAt = 0;
 function lanIp() {
+  if (_lanIpCache !== null && (Date.now() - _lanIpAt) < 30000) return _lanIpCache;
+  let found = null;
   const ifs = os.networkInterfaces();
   for (const name of Object.keys(ifs)) {
     for (const a of ifs[name] || []) {
-      if (a.family === 'IPv4' && !a.internal) return a.address;
+      if (a.family === 'IPv4' && !a.internal) { found = a.address; break; }
     }
+    if (found) break;
   }
-  return null;
+  _lanIpCache = found; _lanIpAt = Date.now();
+  return found;
 }
 function lanBase() { const ip = lanIp(); return ip ? 'http://' + ip + ':' + CONFIG.PORT : null; }
 // The console base the ML API / a same-network phone can reach. Prefers an explicit
@@ -270,9 +275,17 @@ const Logs = (() => {
   const MAX = 800;
   const buf = [];
   let seq = 0;
-  function add(source, level, message, extra) {
-    const e = { seq: ++seq, t: Date.now(), source: source || 'system', level: level || 'info', message: String(message == null ? '' : message).slice(0, 1000) };
-    if (extra && typeof extra === 'object') e.extra = extra;
+  let live = false;            // when false, only CRITICAL events are kept (see below)
+  // Critical = anything you'd want even if you never opened the Logs panel: warnings,
+  // errors, and explicitly-flagged important events (aborts, alerts, ntfy sends/fails).
+  // Routine/info chatter is only captured while the live feed is started.
+  function isCritical(level, opts) { return level === 'warn' || level === 'error' || (opts && opts.critical === true); }
+  function add(source, level, message, opts) {
+    level = level || 'info';
+    if (!live && !isCritical(level, opts)) return null;     // drop routine noise unless live
+    const e = { seq: ++seq, t: Date.now(), source: source || 'system', level, message: String(message == null ? '' : message).slice(0, 1000) };
+    if (opts && opts.critical) e.critical = true;
+    if (opts && opts.extra && typeof opts.extra === 'object') e.extra = opts.extra;
     buf.push(e);
     if (buf.length > MAX) buf.splice(0, buf.length - MAX);
     return e;
@@ -283,14 +296,19 @@ const Logs = (() => {
     if (source && source !== 'all') out = out.filter((e) => e.source === source);
     if (level && level !== 'all') out = out.filter((e) => e.level === level);
     if (out.length > limit) out = out.slice(out.length - limit);
-    return { seq, count: buf.length, entries: out };
+    return { seq, count: buf.length, live, entries: out };
   }
-  return { add, list };
+  return {
+    add, list,
+    setLive(on) { live = !!on; return live; },
+    isLive() { return live; },
+  };
 })();
 
 // Tee console.log/warn/error into the Logs buffer so existing logging (e.g.
 // "[spaghetti] ...", "[moonraker] ...", "[SDCP ...]") shows up in the Logs modal
-// with a sensible source tag — no need to touch every call site.
+// with a sensible source tag — no need to touch every call site. Routine console.log
+// (info) is only kept while the live feed is running; warn/error are always kept.
 (function teeConsole() {
   const map = [['log', 'info'], ['warn', 'warn'], ['error', 'error']];
   for (const [fn, level] of map) {
@@ -795,20 +813,31 @@ class SdcpDriver {
   }
 
   // Tear down sockets + timers so this driver can be replaced (used when the Settings
-  // page changes this printer's connection details and we rebuild it live).
+  // page changes this printer's connection details and we rebuild it live). MUST cancel
+  // EVERY pending timer/socket — a leftover discovery-fallback timer or UDP socket would
+  // open an orphaned WebSocket that fights the live driver for the Centauri's single
+  // connection slot, which shows up as the printer flickering offline + failed commands.
   dispose() {
     this._disposed = true;
-    clearInterval(this._statusTimer); clearInterval(this._pingTimer); clearTimeout(this._reconnectT);
+    clearInterval(this._statusTimer); clearInterval(this._pingTimer);
+    clearTimeout(this._reconnectT); clearTimeout(this._discoverFallbackT);
+    try { if (this._discSock) this._discSock.close(); } catch {}
+    this._discSock = null;
+    for (const [, v] of this.pending) { try { clearTimeout(v.timer); v.resolve({ _timeout: true }); } catch {} }
+    this.pending.clear();
     try { if (this.ws) this.ws.close(); } catch {}
     this.ws = null; this.connected = false;
   }
 
   // UDP broadcast discovery to learn the MainboardID, then open the WebSocket.
   _discoverThenConnect() {
+    if (this._disposed) return;
     if (this.mainboardId) return this._connect();
     let settled = false;
     const sock = dgram.createSocket('udp4');
-    sock.on('error', () => { try { sock.close(); } catch {} this._connect(); });
+    this._discSock = sock;
+    const closeSock = () => { try { sock.close(); } catch {} if (this._discSock === sock) this._discSock = null; };
+    sock.on('error', () => { closeSock(); this._connect(); });
     sock.on('message', (msg) => {
       try {
         const d = JSON.parse(msg.toString());
@@ -816,7 +845,7 @@ class SdcpDriver {
         if (data.MainboardID) {
           this.mainboardId = data.MainboardID;
           settled = true;
-          try { sock.close(); } catch {}
+          closeSock();
           this._connect();
         }
       } catch {}
@@ -830,17 +859,20 @@ class SdcpDriver {
       } catch {}
     });
     // Connect anyway after a moment; the board id can also arrive in pushed status.
-    setTimeout(() => { if (!settled) this._connect(); }, 2500);
+    clearTimeout(this._discoverFallbackT);
+    this._discoverFallbackT = setTimeout(() => { if (!settled && !this._disposed) this._connect(); }, 2500);
   }
 
   _connect() {
-    if (this.ws) return;
+    if (this._disposed || this.ws) return;       // never open a second socket
     try {
       const ws = new WebSocket(this.wsUrl);
       this.ws = ws;
       ws.addEventListener('open', () => {
+        if (this._disposed) { try { ws.close(); } catch {} return; }
         this.connected = true;
         this.lastStatus = blankStatus({ detail: 'connected, awaiting status…' });
+        Logs.add('printer', 'info', (this.p.nickname || this.p.name) + ': connected (SDCP)');
         this._send(SDCP_CMD.ATTRS, {});
         this._send(SDCP_CMD.STATUS, {});
       });
@@ -853,16 +885,20 @@ class SdcpDriver {
   }
 
   _reset() {
+    const wasConnected = this.connected;
     this.connected = false;
     try { if (this.ws) this.ws.close(); } catch {}
     this.ws = null;
+    clearTimeout(this._discoverFallbackT);
     if (this._disposed) return;                 // replaced by a rebuild — don't reconnect
+    if (wasConnected) Logs.add('printer', 'warn', (this.p.nickname || this.p.name) + ': SDCP connection lost — reconnecting');
     this.lastStatus = blankStatus({ detail: 'offline (reconnecting)' });
     clearTimeout(this._reconnectT);
     this._reconnectT = setTimeout(() => this._discoverThenConnect(), 5000);
   }
 
   _onMessage(raw) {
+    if (this._disposed) return;
     if (raw === 'pong' || raw === 'ping') return;
     let msg;
     try { msg = JSON.parse(typeof raw === 'string' ? raw : raw.toString()); } catch { return; }
@@ -1076,8 +1112,12 @@ class SdcpDriver {
 /* ========================================================================== */
 
 class MjpegHub {
-  constructor() { this.clients = new Set(); this.upstream = null; this.url = null; this.headers = null; this.frameWaiters = new Set(); }
-  setUrl(url) { if (url && url !== this.url) { this.url = url; this._fail(); } }
+  constructor() {
+    this.clients = new Set(); this.upstream = null; this.url = null; this.headers = null;
+    this.frameWaiters = new Set();
+    this.lastFrame = null; this.lastFrameAt = 0; this._accum = null;  // latest complete JPEG cache
+  }
+  setUrl(url) { if (url && url !== this.url) { this.url = url; this.lastFrame = null; this._accum = null; this._fail(); } }
 
   attach(res) {
     this.clients.add(res);
@@ -1090,9 +1130,13 @@ class MjpegHub {
   // viewers are currently connected). Reusing the one upstream is required for the
   // Centauri, which only allows a single video stream at a time — a second direct
   // connection would knock out the live feed. Resolves a Buffer.
-  grabFrame(timeout = 8000) {
+  grabFrame(timeout = 8000, maxAgeMs = 2000) {
     return new Promise((resolve, reject) => {
       if (!this.url) return reject(new Error('no stream url'));
+      // Fast path: if the live stream is already flowing (dashboard viewing, or the AI
+      // poll is frequent), hand back the most recent decoded frame with NO new camera
+      // operation. Crucial for the Centauri, which only allows one video stream at a time.
+      if (this.lastFrame && (Date.now() - this.lastFrameAt) < maxAgeMs) return resolve(this.lastFrame);
       const openedHere = !this.upstream;
       if (!this.upstream) this._open();
       let buf = Buffer.alloc(0); let done = false;
@@ -1123,6 +1167,7 @@ class MjpegHub {
       for (const res of this.clients) if (!res.headersSent) res.writeHead(200, this.headers);
       up.on('data', (chunk) => {
         for (const res of this.clients) { try { res.write(chunk); } catch {} }
+        this._absorb(chunk);
         if (this.frameWaiters.size) for (const w of [...this.frameWaiters]) { try { w(chunk); } catch {} }
       });
       up.on('end', () => this._fail());
@@ -1132,7 +1177,20 @@ class MjpegHub {
     this.upstream = req;
   }
 
-  _close() { try { if (this.upstream) this.upstream.destroy(); } catch {} this.upstream = null; this.headers = null; }
+  // Keep a rolling buffer and cache the most recent COMPLETE JPEG frame, so snapshots
+  // can be served instantly off the live stream without touching the camera again.
+  _absorb(chunk) {
+    this._accum = this._accum ? Buffer.concat([this._accum, chunk]) : Buffer.from(chunk);
+    if (this._accum.length > 4 * 1048576) this._accum = this._accum.slice(-2 * 1048576);
+    let soi = this._accum.indexOf(JPEG_SOI), eoi = soi >= 0 ? this._accum.indexOf(JPEG_EOI, soi + 2) : -1;
+    while (eoi >= 0) {
+      this.lastFrame = this._accum.slice(soi, eoi + 2); this.lastFrameAt = Date.now();
+      this._accum = this._accum.slice(eoi + 2);
+      soi = this._accum.indexOf(JPEG_SOI); eoi = soi >= 0 ? this._accum.indexOf(JPEG_EOI, soi + 2) : -1;
+    }
+  }
+
+  _close() { try { if (this.upstream) this.upstream.destroy(); } catch {} this.upstream = null; this.headers = null; this._accum = null; }
 
   // Upstream died -> end all client responses so their <img> retries, then reset.
   _fail() {
@@ -1358,10 +1416,10 @@ function makeWatchdog(idx) {
     }
     try {
       await httpRequest('POST', topic, { body, headers, timeout: 12000 });
-      Logs.add('ntfy', 'info', (title || text || 'push') + (imageBuffer ? ' [+photo]' : '') + (actions ? ' [+abort button]' : ''), { printer: pname() });
+      Logs.add('ntfy', 'info', (title || text || 'push') + (imageBuffer ? ' [+photo]' : '') + (actions ? ' [+abort button]' : ''), { critical: true, extra: { printer: pname() } });
       return { ok: true };
     } catch (e) {
-      Logs.add('ntfy', 'error', 'ntfy failed: ' + (e.code || e.message), { printer: pname() });
+      Logs.add('ntfy', 'error', 'ntfy failed: ' + (e.code || e.message), { extra: { printer: pname() } });
       log('ntfy failed:', e.message);
       return { ok: false, reason: (e.code || e.message) };
     }
@@ -1418,9 +1476,11 @@ function makeWatchdog(idx) {
       await drivers[idx].action('abort');                       // <-- SAME call the Abort button makes
       state.status = 'acted'; state.lastActionSec = nowSec(); state.message = 'CANCELLED - spaghetti detected';
       log('CANCEL sent to', pname());
+      Logs.add('obico', 'warn', pname() + ': spaghetti detected — print AUTO-CANCELLED', { critical: true });
       await failureAlert(true);
     } catch (e) {
       state.status = 'error'; state.message = 'cancel FAILED: ' + e.message; log('cancel failed:', e.message);
+      Logs.add('obico', 'error', pname() + ': spaghetti detected but CANCEL FAILED — ' + e.message, { critical: true });
       await notify('Spaghetti on ' + pname() + ' but CANCEL FAILED: ' + e.message, { title: 'CANCEL FAILED - ' + pname(), priority: 'urgent', tags: 'rotating_light' });
     }
   }
@@ -1428,6 +1488,7 @@ function makeWatchdog(idx) {
     if (state.status === 'alert') return;                       // already latched
     state.status = 'alert'; state.alertSince = nowSec(); state.message = 'ALERT - spaghetti detected; stop it manually';
     log('ALERT (notify) on', pname());
+    Logs.add('obico', 'warn', pname() + ': possible spaghetti — ALERT raised (notify)', { critical: true });
     await failureAlert(false);
   }
 
@@ -1627,6 +1688,14 @@ const server = http.createServer(async (req, res) => {
         level: url.searchParams.get('level'),
         limit: Math.min(800, Number(url.searchParams.get('limit')) || 400),
       }));
+    }
+    // Start/stop capturing non-critical (routine) log activity. Critical events
+    // (errors/warnings, aborts, alerts, ntfy) are always kept regardless.
+    if (p === '/api/logs/live' && req.method === 'POST') {
+      const body = await readBody(req);
+      const live = Logs.setLive(!!body.on);
+      Logs.add('system', 'info', 'live log feed ' + (live ? 'started' : 'stopped'), { critical: true });
+      return sendJson(res, { ok: true, live });
     }
 
     // Per-printer watchdog routes. Legacy /api/spaghetti/* (no index) maps to the

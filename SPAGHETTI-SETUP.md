@@ -179,9 +179,15 @@ Auto-cancel always reuses that printer's existing cancel — the **same** call a
 button. It never sends M112, and it never cancels on an error or a stale frame.
 
 ## Master Logs (header → Logs)
-The **Logs** button in the header opens a live, filterable feed that aggregates everything
-the console sees: **AI** watchdog activity (trips/alerts/auto-cancels), **Control** actions
-(pause/resume/abort/jog/temps/fans/speed on either printer), **ntfy** pushes, **printer**
-connection notes, and **system** output. It polls `GET /api/logs` every 2.5s; filter by
-source with the chips at the top. It's an in-memory ring buffer (newest at the bottom), so
-it resets when the server restarts — it's for "what just happened?", not long-term history.
+The **Logs** button in the header opens a filterable feed that aggregates what the console
+sees: **AI** watchdog activity, **Control** actions, **ntfy** pushes, **printer** connect/
+disconnect notes, and **system** output.
+
+By default the feed is **idle** — only **critical** events are kept in the background
+(errors, warnings, aborts, AI alerts/auto-cancels, ntfy sends/failures, printer connection
+drops). Routine/info chatter is **not** captured and the page does **not** poll until you
+press **Start live feed**; press it again (or close the panel) to stop. This keeps the logs
+from "constantly running" while still always recording the things you'd want after the
+fact. Filter by source with the chips; newest is at the bottom. It's an in-memory ring
+buffer, so it resets on server restart — it's for "what just happened?", not history.
+(`GET /api/logs`, `POST /api/logs/live {on}`.)

@@ -102,8 +102,11 @@ That's it — no build step, no database, no services to install.
 - `GET /api/printers` — list + capabilities
 - `GET /api/{id}/status` — normalized live status
 - `GET /api/{id}/stream` — proxied MJPEG camera
+- `GET /api/{id}/snapshot` — a single fresh JPEG still (used by the AI watchdog + alerts)
 - `GET /api/{id}/files` · `GET /api/{id}/history`
 - `POST /api/{id}/action` — `{ action: "pause"|"resume"|"abort"|"jog"|"home"|"setTemp"|"setFan"|"setSpeed", ... }`
+- `GET /api/spaghetti` — aggregate watchdog state; `GET|POST /api/{id}/spaghetti[...]` per printer
+- `GET /api/logs` — the master log buffer (the Logs modal polls this)
 
 ---
 
@@ -112,9 +115,22 @@ That's it — no build step, no database, no services to install.
 The UI is themed in the house colors (espresso brown, tan, whitewashed copper). The
 OrangeStorm Giga shows as **The Forge** (set via `nickname` in `CONFIG.PRINTERS`).
 You can give the Centauri a nickname too — there's a `nickname: null` slot on it
-(e.g. `'The Anvil'`). The print-progress indicator is a hammer striking an anvil
-that travels along the bar as the job advances: it hammers while printing, rests
-when paused, and hides when the printer is idle/offline.
+(e.g. `'The Anvil'`). The print-progress indicator is a **hand-swung hammer striking an
+anvil** that travels along the bar as the job advances: the hand winds the hammer back and
+swings it through a ~45° arc, **sparks fly off the impact**, and the **live percentage
+rides up with the sparks** on each strike. It hammers while printing, rests when paused,
+and hides when the printer is idle/offline.
+
+## AI watchdog (both printers) & master Logs
+
+- **AI spaghetti watchdog — both printers.** Each printer has its own **AI pill** and its
+  own independent watchdog (Forge via Moonraker's snapshot, Anvil via a snapshot the
+  console proxies off the shared camera hub). Alerts name the failing printer, attach a
+  **photo**, and can carry a one-tap **Abort** button to your phone. See
+  [`SPAGHETTI-SETUP.md`](SPAGHETTI-SETUP.md) — note the Anvil needs `CONFIG.SELF_BASE_URL`
+  set, and the phone Abort button needs it too.
+- **Logs** button in the header opens a live, filterable feed of AI / control / ntfy /
+  printer / system events — "what just happened?" in one place.
 
 ## Filament (3DXTech)
 

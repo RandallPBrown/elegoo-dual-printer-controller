@@ -17,12 +17,24 @@ const dgram = require('dgram');
 const fs    = require('fs');
 const path  = require('path');
 const crypto = require('crypto');
+const util  = require('util');
 
 /* =============================== CONFIG =================================== */
 
 const CONFIG = {
   PORT: 8080,
   HOST: '0.0.0.0',
+
+  // The address at which THIS console is reachable FROM YOUR PHONE / the ML API box
+  // (e.g. 'https://forge.example.com' or 'http://192.168.10.50:8080'). Used for two
+  // things: (1) the "Abort print" + "Open console" action buttons on the ntfy push,
+  // and (2) letting the Obico ML API fetch the Centauri's snapshot (SDCP has no
+  // direct snapshot URL, so the model is pointed at THIS server's /api/<id>/snapshot).
+  // Leave null to disable the phone-abort button (alerts still carry the photo).
+  // SECURITY NOTE: if this is a public URL, the /api/<id>/action endpoint it points at
+  // is unauthenticated — anyone with the link could abort a print. Put it behind a
+  // VPN / reverse-proxy auth if that matters to you.
+  SELF_BASE_URL: process.env.SELF_BASE_URL || null,
 
   PRINTERS: [
     {
@@ -39,6 +51,12 @@ const CONFIG = {
       // Pin the camera stream to the IP above (the printer occasionally reports a
       // stale host in the Cmd 386 response). Set false to trust the reported URL.
       forceVideoHost: true,
+      // Per-printer AI watchdog overrides (merged over CONFIG.SPAGHETTI defaults).
+      // The Anvil has no direct snapshot URL, so the ML API is pointed at this server's
+      // /api/<id>/snapshot (which grabs a frame off the shared camera hub). That needs
+      // SELF_BASE_URL set above. Ships 'off' so nothing arms unexpectedly — turn it on
+      // from the AI pill on the Anvil's card once you trust it.
+      spaghetti: { mode: 'off', snapshotUrl: null },
     },
     {
       name: 'OrangeStorm Giga',
@@ -61,6 +79,10 @@ const CONFIG = {
       // hard-set them here (null = auto-discover):
       extruders: null,   // e.g. ['extruder','extruder1','extruder2','extruder3']
       bedHeaters: null,  // e.g. ['heater_bed','heater_generic bed_2','heater_generic bed_3','heater_generic bed_4']
+      // Per-printer AI watchdog overrides. The Forge keeps the historical default mode
+      // (CONFIG.SPAGHETTI.mode, 'notify'). snapshotUrl null = derive action=snapshot from
+      // the webcam URL above (works directly for the ML API).
+      spaghetti: { mode: null, snapshotUrl: null },
     },
   ],
 
@@ -118,6 +140,93 @@ const CONFIG = {
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const uuid = () => crypto.randomUUID();
 const nowSec = () => Math.floor(Date.now() / 1000);
+
+/* ========================================================================== */
+/*  Central log buffer (the "Logs" modal)                                     */
+/*  A small in-memory ring buffer that aggregates events from everywhere:     */
+/*  the AI watchdogs (obico), Forge control actions (control), printer/camera */
+/*  connection notes, ntfy pushes, and the server's own console output. The   */
+/*  Logs modal polls /api/logs and shows it, filterable by source.            */
+/* ========================================================================== */
+
+const Logs = (() => {
+  const MAX = 800;
+  const buf = [];
+  let seq = 0;
+  function add(source, level, message, extra) {
+    const e = { seq: ++seq, t: Date.now(), source: source || 'system', level: level || 'info', message: String(message == null ? '' : message).slice(0, 1000) };
+    if (extra && typeof extra === 'object') e.extra = extra;
+    buf.push(e);
+    if (buf.length > MAX) buf.splice(0, buf.length - MAX);
+    return e;
+  }
+  function list({ since = 0, source = null, level = null, limit = 400 } = {}) {
+    let out = buf;
+    if (since) out = out.filter((e) => e.seq > since);
+    if (source && source !== 'all') out = out.filter((e) => e.source === source);
+    if (level && level !== 'all') out = out.filter((e) => e.level === level);
+    if (out.length > limit) out = out.slice(out.length - limit);
+    return { seq, count: buf.length, entries: out };
+  }
+  return { add, list };
+})();
+
+// Tee console.log/warn/error into the Logs buffer so existing logging (e.g.
+// "[spaghetti] ...", "[moonraker] ...", "[SDCP ...]") shows up in the Logs modal
+// with a sensible source tag — no need to touch every call site.
+(function teeConsole() {
+  const map = [['log', 'info'], ['warn', 'warn'], ['error', 'error']];
+  for (const [fn, level] of map) {
+    const orig = console[fn].bind(console);
+    console[fn] = (...args) => {
+      orig(...args);
+      try {
+        const msg = util.format(...args);
+        let source = 'system';
+        if (/\[spaghetti\]/.test(msg)) source = 'obico';
+        else if (/\[moonraker\]|\[SDCP/.test(msg)) source = 'printer';
+        Logs.add(source, level, msg.replace(/^\[(spaghetti|moonraker)\]\s*/, '').replace(/^\[SDCP[^\]]*\]\s*/, ''));
+      } catch {}
+    };
+  }
+})();
+
+// JPEG frame markers (start-of-image / end-of-image), used to pull a single still
+// out of a (possibly multipart MJPEG) HTTP response.
+const JPEG_SOI = Buffer.from([0xff, 0xd8]);
+const JPEG_EOI = Buffer.from([0xff, 0xd9]);
+
+// Fetch ONE JPEG from a URL. Works for a plain snapshot (single JPEG) and for an
+// MJPEG stream (grabs the first complete frame, then disconnects). Resolves a Buffer.
+function grabJpeg(url, { timeout = 8000, maxBytes = 8 * 1048576 } = {}) {
+  return new Promise((resolve, reject) => {
+    let u; try { u = new URL(url); } catch (e) { return reject(e); }
+    const mod = u.protocol === 'https:' ? https : http;
+    let done = false;
+    const req = mod.get(u, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      const chunks = []; let total = 0;
+      const finish = (buf) => { if (done) return; done = true; try { req.destroy(); } catch {} resolve(buf); };
+      res.on('data', (c) => {
+        if (done) return;
+        chunks.push(c); total += c.length;
+        const buf = Buffer.concat(chunks);
+        const soi = buf.indexOf(JPEG_SOI);
+        if (soi >= 0) { const eoi = buf.indexOf(JPEG_EOI, soi + 2); if (eoi >= 0) return finish(buf.slice(soi, eoi + 2)); }
+        if (total > maxBytes) { done = true; try { req.destroy(); } catch {} reject(new Error('snapshot too large')); }
+      });
+      res.on('end', () => {
+        if (done) return;
+        const buf = Buffer.concat(chunks);
+        const soi = buf.indexOf(JPEG_SOI), eoi = soi >= 0 ? buf.indexOf(JPEG_EOI, soi + 2) : -1;
+        if (soi >= 0 && eoi >= 0) finish(buf.slice(soi, eoi + 2)); else reject(new Error('no JPEG in response'));
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(timeout, () => { req.destroy(new Error('timeout')); });
+  });
+}
 
 function round1(n) { return (typeof n === 'number' && isFinite(n)) ? Math.round(n * 10) / 10 : null; }
 function round2(n) { return (typeof n === 'number' && isFinite(n)) ? Math.round(n * 100) / 100 : null; }
@@ -838,14 +947,38 @@ class SdcpDriver {
 /* ========================================================================== */
 
 class MjpegHub {
-  constructor() { this.clients = new Set(); this.upstream = null; this.url = null; this.headers = null; }
+  constructor() { this.clients = new Set(); this.upstream = null; this.url = null; this.headers = null; this.frameWaiters = new Set(); }
   setUrl(url) { if (url && url !== this.url) { this.url = url; this._fail(); } }
 
   attach(res) {
     this.clients.add(res);
     if (this.headers && !res.headersSent) res.writeHead(200, this.headers);
     if (!this.upstream) this._open();
-    res.on('close', () => { this.clients.delete(res); if (this.clients.size === 0) this._close(); });
+    res.on('close', () => { this.clients.delete(res); if (this.clients.size === 0 && this.frameWaiters.size === 0) this._close(); });
+  }
+
+  // Grab a single JPEG frame off the EXISTING upstream (opening one briefly if no
+  // viewers are currently connected). Reusing the one upstream is required for the
+  // Centauri, which only allows a single video stream at a time — a second direct
+  // connection would knock out the live feed. Resolves a Buffer.
+  grabFrame(timeout = 8000) {
+    return new Promise((resolve, reject) => {
+      if (!this.url) return reject(new Error('no stream url'));
+      const openedHere = !this.upstream;
+      if (!this.upstream) this._open();
+      let buf = Buffer.alloc(0); let done = false;
+      const cleanup = () => { this.frameWaiters.delete(waiter); clearTimeout(timer); if (openedHere && this.clients.size === 0 && this.frameWaiters.size === 0) this._close(); };
+      const finish = (out) => { if (done) return; done = true; cleanup(); resolve(out); };
+      const fail = (e) => { if (done) return; done = true; cleanup(); reject(e); };
+      const waiter = (chunk) => {
+        if (done) return;
+        buf = buf.length > 6 * 1048576 ? Buffer.from(chunk) : Buffer.concat([buf, chunk]);
+        const soi = buf.indexOf(JPEG_SOI);
+        if (soi >= 0) { const eoi = buf.indexOf(JPEG_EOI, soi + 2); if (eoi >= 0) finish(buf.slice(soi, eoi + 2)); }
+      };
+      const timer = setTimeout(() => fail(new Error('snapshot timeout')), timeout);
+      this.frameWaiters.add(waiter);
+    });
   }
 
   _open() {
@@ -859,7 +992,10 @@ class MjpegHub {
         'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Connection': 'close',
       };
       for (const res of this.clients) if (!res.headersSent) res.writeHead(200, this.headers);
-      up.on('data', (chunk) => { for (const res of this.clients) { try { res.write(chunk); } catch {} } });
+      up.on('data', (chunk) => {
+        for (const res of this.clients) { try { res.write(chunk); } catch {} }
+        if (this.frameWaiters.size) for (const w of [...this.frameWaiters]) { try { w(chunk); } catch {} }
+      });
       up.on('end', () => this._fail());
       up.on('error', () => this._fail());
     });
@@ -886,6 +1022,26 @@ const drivers = CONFIG.PRINTERS.map((p) => (p.driver === 'sdcp' ? new SdcpDriver
 const hubs = CONFIG.PRINTERS.map(() => new MjpegHub());
 hubs.forEach((h, i) => { h.onFail = () => { if (drivers[i].invalidateVideo) drivers[i].invalidateVideo(); }; });
 
+// Grab a single fresh JPEG still from a printer's camera, by index. Moonraker has a
+// direct snapshot endpoint (action=snapshot); the Centauri (SDCP, single-stream) is
+// tapped off the shared MJPEG hub so the live feed isn't disturbed. Resolves a Buffer.
+async function snapshotFor(i) {
+  const d = drivers[i], hub = hubs[i];
+  if (!d) throw new Error('no such printer');
+  if (d.kind === 'moonraker') {
+    const pconf = (d.p && d.p.spaghetti) || {};
+    const snapUrl = pconf.snapshotUrl
+      || (d.webcamUrl ? d.webcamUrl.replace(/action=stream/i, 'action=snapshot') : null)
+      || d.webcamUrl;
+    return grabJpeg(snapUrl, { timeout: 8000 });
+  }
+  // SDCP: tap the shared hub (single video stream allowed by the printer)
+  const info = await d.cameraInfo();
+  if (!info.ok || !info.url) throw new Error(info.reason || 'camera unavailable');
+  hub.setUrl(info.url);
+  return hub.grabFrame(8000);
+}
+
 /* ========================================================================== */
 /*  AI spaghetti watchdog                                                      */
 /*  Polls a self-hosted Obico ML API on the Giga's snapshot. Behaviour depends  */
@@ -896,16 +1052,38 @@ hubs.forEach((h, i) => { h.onFail = () => { if (drivers[i].invalidateVideo) driv
 
 const SPAG_SETTINGS_PATH = path.join(__dirname, 'spaghetti.settings.json');
 
-const Spaghetti = (() => {
+// Load the per-printer settings map from disk. Back-compat: an older single-watchdog
+// file (a flat object with `mode`/`thresholds`) is attached to the Moonraker printer.
+function loadSpagSettings() {
+  let j; try { j = JSON.parse(fs.readFileSync(SPAG_SETTINGS_PATH, 'utf8')); } catch { return {}; }
+  if (j && j.byPrinter && typeof j.byPrinter === 'object') return j.byPrinter;
+  if (j && typeof j === 'object' && ('mode' in j || 'thresholds' in j || 'notify' in j)) {
+    const mi = CONFIG.PRINTERS.findIndex((p) => p.driver === 'moonraker');
+    return { [mi < 0 ? 0 : mi]: j };
+  }
+  return {};
+}
+const SPAG_SAVED = loadSpagSettings();
+
+// Persist EVERY watchdog's settings back to the one file as { byPrinter: { idx: {...} } }.
+function persistSpag() {
+  const byPrinter = {};
+  for (const w of Watchdogs.list) byPrinter[w.index] = w.persistable();
+  try { fs.writeFileSync(SPAG_SETTINGS_PATH, JSON.stringify({ byPrinter }, null, 2)); return true; }
+  catch (e) { console.log('[spaghetti] save failed:', e.message); return false; }
+}
+
+// One AI watchdog per printer. Each runs its own poll loop, holds its own mode/
+// thresholds/state, and notifies with the FAILING printer's name + a fresh photo.
+function makeWatchdog(idx) {
   const C = CONFIG.SPAGHETTI || {};
+  const pconf = (CONFIG.PRINTERS[idx] && CONFIG.PRINTERS[idx].spaghetti) || {};
   const MODES = ['off', 'notify', 'act', 'schedule'];
-  const idx = (typeof C.printerIndex === 'number' && C.printerIndex >= 0)
-    ? C.printerIndex
-    : CONFIG.PRINTERS.findIndex((pr) => pr.driver === 'moonraker');
+  const defaultMode = MODES.includes(pconf.mode) ? pconf.mode : (MODES.includes(C.mode) ? C.mode : 'notify');
 
   const state = {
     printerIndex: idx,
-    mode: MODES.includes(C.mode) ? C.mode : 'notify',
+    mode: defaultMode,
     schedule: { actStart: (C.schedule && C.schedule.actStart) || '22:00', actEnd: (C.schedule && C.schedule.actEnd) || '07:00' },
     thresholds: {
       consecutiveTrips: C.consecutiveTrips || 4,
@@ -925,10 +1103,37 @@ const Spaghetti = (() => {
   };
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const log = (...a) => console.log('[spaghetti]', ...a);
+  const log = (...a) => console.log('[spaghetti]', '#' + idx, ...a);
   const pname = () => (CONFIG.PRINTERS[idx] && (CONFIG.PRINTERS[idx].nickname || CONFIG.PRINTERS[idx].name)) || 'the printer';
   // The topic can be set live in the UI (state.notify.ntfyTopic); fall back to CONFIG.
   const ntfyTopic = () => state.notify.ntfyTopic || (C.notify && C.notify.ntfyTopic) || C.ntfyTopic || '';
+  const mlConfigured = () => !(!C.mlApi || /CHANGE-ME/i.test(C.mlApi));
+
+  // The same-origin path the browser loads to preview the snapshot (Calibrate / dead
+  // zones). Proxied through this server, so laptops never need direct camera access.
+  const uiSnapshotUrl = () => '/api/' + idx + '/snapshot';
+  // The ABSOLUTE url the Obico ML API box fetches. Moonraker has a real snapshot
+  // endpoint; SDCP (the Anvil) has none, so the model is pointed back at THIS server's
+  // /api/<idx>/snapshot via SELF_BASE_URL.
+  function mlSnapshotUrl() {
+    if (pconf.snapshotUrl) return pconf.snapshotUrl;
+    const drv = drivers[idx];
+    if (drv && drv.kind === 'moonraker') {
+      return C.snapshotUrl || (drv.webcamUrl ? drv.webcamUrl.replace(/action=stream/i, 'action=snapshot') : '') || '';
+    }
+    const base = (CONFIG.SELF_BASE_URL || '').replace(/\/+$/, '');
+    return base ? base + '/api/' + idx + '/snapshot' : '';
+  }
+
+  // ntfy "Actions" header: a direct Abort button + an Open-console button. Both need a
+  // phone-reachable console address (SELF_BASE_URL); without it we return null and the
+  // alert simply ships without buttons (the photo still goes through).
+  function buildActions() {
+    const base = (CONFIG.SELF_BASE_URL || '').replace(/\/+$/, '');
+    if (!base) return null;
+    const abortUrl = base + '/api/' + idx + '/action';
+    return 'http, Abort print, ' + abortUrl + ", method=POST, body='" + '{"action":"abort"}' + "', clear=true; view, Open console, " + base;
+  }
 
   function sanitizeThresholds(t) {
     const o = {};
@@ -940,14 +1145,11 @@ const Spaghetti = (() => {
     return o;
   }
   function persistable() { return { mode: state.mode, schedule: state.schedule, thresholds: state.thresholds, ignoreZones: state.ignoreZones, notify: { ntfy: state.notify.ntfy, ntfyTopic: state.notify.ntfyTopic } }; }
-  function save() {
-    try { fs.writeFileSync(SPAG_SETTINGS_PATH, JSON.stringify(persistable(), null, 2)); return true; }
-    catch (e) { log('save failed:', e.message); return false; }
-  }
+  function save() { return persistSpag(); }
   function load() {
-    let raw; try { raw = fs.readFileSync(SPAG_SETTINGS_PATH, 'utf8'); } catch { return; }
+    const j = SPAG_SAVED[idx];
+    if (!j || typeof j !== 'object') return;
     try {
-      const j = JSON.parse(raw); if (!j || typeof j !== 'object') return;
       if (MODES.includes(j.mode)) state.mode = j.mode;
       if (j.schedule && /^\d{1,2}:\d{2}$/.test(j.schedule.actStart || '') && /^\d{1,2}:\d{2}$/.test(j.schedule.actEnd || '')) state.schedule = { actStart: j.schedule.actStart, actEnd: j.schedule.actEnd };
       if (j.thresholds) Object.assign(state.thresholds, sanitizeThresholds(j.thresholds));
@@ -955,7 +1157,7 @@ const Spaghetti = (() => {
       if (j.notify && 'ntfy' in j.notify) state.notify.ntfy = !!j.notify.ntfy;
       if (j.notify && typeof j.notify.ntfyTopic === 'string') state.notify.ntfyTopic = j.notify.ntfyTopic.trim();
       log('loaded saved settings (mode=' + state.mode + ')');
-    } catch (e) { log('settings file unreadable, using CONFIG defaults:', e.message); }
+    } catch (e) { log('settings unreadable, using defaults:', e.message); }
   }
 
   function parseHM(str, dflt) { const m = /^(\d{1,2}):(\d{2})$/.exec(String(str || '')); if (!m) return dflt; const h = +m[1], mi = +m[2]; return (h > 23 || mi > 59) ? dflt : h * 60 + mi; }
@@ -967,22 +1169,56 @@ const Spaghetti = (() => {
   }
   function effectiveMode() { return state.mode === 'schedule' ? (inActWindow() ? 'act' : 'notify') : state.mode; }
 
-  // Low-level ntfy push. ntfy reads Title/Priority/Tags from HTTP headers and the
-  // alert text from the body. Header values must be ASCII (Latin-1), so emoji go in
-  // Tags (ntfy renders e.g. "warning" as ⚠️); the UTF-8 body can hold anything.
-  async function ntfyPush(text, { title, priority, tags } = {}) {
+  // Low-level ntfy push. ntfy reads Title/Priority/Tags/Actions/Click from HTTP headers.
+  // Header values must be ASCII (Latin-1), so emoji go in Tags (ntfy renders "warning"
+  // as ⚠️). When an imageBuffer is given, the JPEG is sent as the body (an ntfy
+  // attachment) and the alert text rides in the Message header instead.
+  async function ntfyPush(text, { title, priority, tags, imageBuffer, actions, click } = {}) {
     const topic = ntfyTopic();
     if (!topic) return { ok: false, reason: 'no ntfy topic set' };
+    const ascii = (s, n) => String(s).replace(/[^\x20-\x7e]/g, '').slice(0, n);
     const headers = {};
-    if (title) headers.Title = String(title).replace(/[^\x20-\x7e]/g, '').slice(0, 120);
+    if (title) headers.Title = ascii(title, 120);
     if (priority) headers.Priority = String(priority);
     if (tags) headers.Tags = String(tags);
-    try { await httpRequest('POST', topic, { body: text, headers, timeout: 8000 }); return { ok: true }; }
-    catch (e) { log('ntfy failed:', e.message); return { ok: false, reason: (e.code || e.message) }; }
+    if (actions) headers.Actions = ascii(actions, 900);
+    if (click) headers.Click = String(click);
+    let body = text;
+    if (imageBuffer && imageBuffer.length) {
+      headers.Filename = 'snapshot.jpg';
+      headers['Content-Type'] = 'image/jpeg';
+      if (text) headers.Message = ascii(text, 300);
+      body = imageBuffer;
+    }
+    try {
+      await httpRequest('POST', topic, { body, headers, timeout: 12000 });
+      Logs.add('ntfy', 'info', (title || text || 'push') + (imageBuffer ? ' [+photo]' : '') + (actions ? ' [+abort button]' : ''), { printer: pname() });
+      return { ok: true };
+    } catch (e) {
+      Logs.add('ntfy', 'error', 'ntfy failed: ' + (e.code || e.message), { printer: pname() });
+      log('ntfy failed:', e.message);
+      return { ok: false, reason: (e.code || e.message) };
+    }
   }
   async function notify(text, opts) {
     if (!state.notify.ntfy || !ntfyTopic()) return;
     await ntfyPush(text, opts);
+  }
+
+  // A failure alert that carries a fresh photo of the FAILING printer plus the phone
+  // Abort/Open-console buttons. cancelled=true when the print was auto-cancelled.
+  async function failureAlert(cancelled) {
+    if (!state.notify.ntfy || !ntfyTopic()) return;
+    let img = null;
+    try { img = await snapshotFor(idx); } catch (e) { log('alert snapshot failed:', e.message); }
+    const title = (cancelled ? 'Print cancelled - ' : 'Failure detected - ') + pname();
+    const text = cancelled
+      ? 'Spaghetti detected on ' + pname() + ' - print CANCELLED.'
+      : '⚠ Possible spaghetti on ' + pname() + ' - open the console and stop the print.';
+    await ntfyPush(text, {
+      title, priority: cancelled ? 'urgent' : 'high', tags: cancelled ? 'rotating_light' : 'warning',
+      imageBuffer: img, actions: cancelled ? null : buildActions(), click: CONFIG.SELF_BASE_URL || undefined,
+    });
   }
 
   function inIgnore(cx, cy) {
@@ -993,7 +1229,9 @@ const Spaghetti = (() => {
     return false;
   }
   async function rawDetections() {
-    const api = String(C.mlApi || '').replace(/\/+$/, '') + '/p/?img=' + encodeURIComponent(C.snapshotUrl || '');
+    const snap = mlSnapshotUrl();
+    if (!snap) throw new Error('no snapshot URL — set CONFIG.SELF_BASE_URL so the model can fetch ' + pname() + "'s /api/" + idx + '/snapshot');
+    const api = String(C.mlApi || '').replace(/\/+$/, '') + '/p/?img=' + encodeURIComponent(snap);
     const r = await httpRequest('GET', api, { timeout: C.httpTimeoutMs || 15000 });
     return Array.isArray(r.json) ? r.json : [];   // [["failure", conf, [cx,cy,w,h]], ...]
   }
@@ -1014,21 +1252,21 @@ const Spaghetti = (() => {
       await drivers[idx].action('abort');                       // <-- SAME call the Abort button makes
       state.status = 'acted'; state.lastActionSec = nowSec(); state.message = 'CANCELLED - spaghetti detected';
       log('CANCEL sent to', pname());
-      await notify('Spaghetti detected on ' + pname() + ' - print CANCELLED.', { title: 'Print cancelled - ' + pname(), priority: 'urgent', tags: 'rotating_light' });
+      await failureAlert(true);
     } catch (e) {
       state.status = 'error'; state.message = 'cancel FAILED: ' + e.message; log('cancel failed:', e.message);
       await notify('Spaghetti on ' + pname() + ' but CANCEL FAILED: ' + e.message, { title: 'CANCEL FAILED - ' + pname(), priority: 'urgent', tags: 'rotating_light' });
     }
   }
-  function raiseAlert() {
+  async function raiseAlert() {
     if (state.status === 'alert') return;                       // already latched
     state.status = 'alert'; state.alertSince = nowSec(); state.message = 'ALERT - spaghetti detected; stop it manually';
     log('ALERT (notify) on', pname());
-    notify('\u26a0 Possible spaghetti on ' + pname() + ' - open the console and stop the print.', { title: 'Failure detected - ' + pname(), priority: 'high', tags: 'warning' });
+    await failureAlert(false);
   }
 
   async function tick() {
-    if (idx < 0 || !drivers[idx]) { state.status = 'disabled'; state.message = 'no Moonraker printer to watch'; return; }
+    if (idx < 0 || !drivers[idx]) { state.status = 'disabled'; state.message = 'no printer to watch'; return; }
     if (state.mode === 'off') { state.status = 'disabled'; state.streak = 0; state.message = 'off'; return; }
 
     const st = await drivers[idx].getStatus();
@@ -1067,7 +1305,7 @@ const Spaghetti = (() => {
       if (state.streak === 1 && C.notifyOnFirstTrip) notify('Possible spaghetti forming on ' + pname() + '…', { title: 'Watching - ' + pname(), priority: 'low', tags: 'eyes' });
       if (state.streak >= need) {
         if (effectiveMode() === 'act') { await fire(); state.streak = 0; await sleep((C.pollSeconds || 25) * 3 * 1000); }
-        else { raiseAlert(); state.streak = 0; }                // notify: latch, don't cancel
+        else { await raiseAlert(); state.streak = 0; }          // notify: latch, don't cancel
       }
     } else {
       state.streak = 0; state.status = 'watching';
@@ -1090,6 +1328,7 @@ const Spaghetti = (() => {
   function snapshot() {
     return {
       printerIndex: state.printerIndex,
+      printerName: pname(),
       mode: state.mode,
       effectiveMode: effectiveMode(),
       inActWindow: state.mode === 'schedule' ? inActWindow() : (state.mode === 'act'),
@@ -1103,8 +1342,10 @@ const Spaghetti = (() => {
       lastScore: state.lastScore, lastMax: state.lastMax, boxes: state.boxes,
       lastCheckSec: state.lastCheckSec, lastActionSec: state.lastActionSec,
       message: state.message,
-      snapshotUrl: C.snapshotUrl || '',
-      mlConfigured: !(!C.mlApi || /CHANGE-ME/i.test(C.mlApi)),
+      snapshotUrl: uiSnapshotUrl(),
+      snapshotReady: !!mlSnapshotUrl(),
+      phoneAbort: !!buildActions(),
+      mlConfigured: mlConfigured(),
     };
   }
 
@@ -1130,23 +1371,42 @@ const Spaghetti = (() => {
   }
 
   async function probe() {
-    const base = { snapshotUrl: C.snapshotUrl || '', ignoreZones: state.ignoreZones, thresholds: state.thresholds };
-    if (!C.mlApi || /CHANGE-ME/i.test(C.mlApi)) return Object.assign({ ok: false, reason: 'mlApi not set in CONFIG' }, base);
+    const base = { snapshotUrl: uiSnapshotUrl(), ignoreZones: state.ignoreZones, thresholds: state.thresholds };
+    if (!mlConfigured()) return Object.assign({ ok: false, reason: 'CONFIG.SPAGHETTI.mlApi not set' }, base);
+    if (!mlSnapshotUrl()) return Object.assign({ ok: false, reason: 'No snapshot URL for ' + pname() + ' — set CONFIG.SELF_BASE_URL so the model can fetch /api/' + idx + '/snapshot' }, base);
     try { const dets = await rawDetections(); return Object.assign({ ok: true, detections: dets, score: scoreOf(dets) }, base); }
     catch (e) { return Object.assign({ ok: false, reason: (e.code || e.message) }, base); }
   }
 
   async function testNotify() {
     if (!ntfyTopic()) return { ok: false, reason: 'no ntfy topic set - enter one in the Notifications panel (or CONFIG.SPAGHETTI.notify.ntfyTopic)' };
-    return ntfyPush('Test alert from the Forge console - phone notifications are working.', { title: 'Forge console test', priority: 'high', tags: 'white_check_mark' });
+    let img = null; try { img = await snapshotFor(idx); } catch {}
+    return ntfyPush('Test alert from the ' + pname() + ' console - phone notifications are working.', { title: pname() + ' console test', priority: 'high', tags: 'white_check_mark', imageBuffer: img, actions: buildActions(), click: CONFIG.SELF_BASE_URL || undefined });
   }
 
   load(); // overlay any saved settings on top of CONFIG defaults
 
   return {
+    index: idx,
+    persistable,
     snapshot, applySettings, probe, testNotify,
     start() { if (!running) loop(); },
     reset() { state.streak = 0; state.alertSince = null; if (['alert', 'acted', 'tripped', 'error'].includes(state.status)) { state.status = 'idle'; state.message = 'reset'; } return true; },
+  };
+}
+
+// One watchdog per printer, managed together.
+const Watchdogs = (() => {
+  const list = CONFIG.PRINTERS.map((p, i) => makeWatchdog(i));
+  const byIndex = {};
+  list.forEach((w) => { byIndex[w.index] = w; });
+  const defaultIndex = () => { const mi = CONFIG.PRINTERS.findIndex((p) => p.driver === 'moonraker'); return mi < 0 ? 0 : mi; };
+  return {
+    list, byIndex,
+    get(i) { return byIndex[i] || null; },
+    startAll() { list.forEach((w) => w.start()); },
+    snapshotAll() { return list.map((w) => w.snapshot()); },
+    default() { return byIndex[defaultIndex()] || list[0]; },
   };
 })();
 
@@ -1182,18 +1442,32 @@ const server = http.createServer(async (req, res) => {
       })));
     }
 
-    if (p === '/api/spaghetti') return sendJson(res, Spaghetti.snapshot());
-    if (p === '/api/spaghetti/settings' && req.method === 'POST') {
-      const body = await readBody(req);
-      Spaghetti.applySettings(body);
-      return sendJson(res, { ok: true, state: Spaghetti.snapshot() });
+    // Aggregate watchdog state for all printers (the pills poll this).
+    if (p === '/api/spaghetti') return sendJson(res, { watchers: Watchdogs.snapshotAll() });
+
+    // Central log buffer (the Logs modal).
+    if (p === '/api/logs') {
+      return sendJson(res, Logs.list({
+        since: Number(url.searchParams.get('since')) || 0,
+        source: url.searchParams.get('source'),
+        level: url.searchParams.get('level'),
+        limit: Math.min(800, Number(url.searchParams.get('limit')) || 400),
+      }));
     }
-    if (p === '/api/spaghetti/reset' && req.method === 'POST') {
-      Spaghetti.reset();
-      return sendJson(res, { ok: true, state: Spaghetti.snapshot() });
+
+    // Per-printer watchdog routes. Legacy /api/spaghetti/* (no index) maps to the
+    // default Moonraker printer so older bookmarks keep working.
+    let sm;
+    if ((sm = p.match(/^\/api\/(?:(\d+)\/)?spaghetti(\/settings|\/reset|\/probe|\/test-notify)?$/))) {
+      const w = sm[1] != null ? Watchdogs.get(+sm[1]) : Watchdogs.default();
+      if (!w) return sendJson(res, { error: 'no such watchdog' }, 404);
+      const sub = sm[2] || '';
+      if (sub === '' ) return sendJson(res, w.snapshot());
+      if (sub === '/settings' && req.method === 'POST') { const body = await readBody(req); w.applySettings(body); return sendJson(res, { ok: true, state: w.snapshot() }); }
+      if (sub === '/reset' && req.method === 'POST') { w.reset(); return sendJson(res, { ok: true, state: w.snapshot() }); }
+      if (sub === '/probe') return sendJson(res, await w.probe());
+      if (sub === '/test-notify' && req.method === 'POST') return sendJson(res, await w.testNotify());
     }
-    if (p === '/api/spaghetti/probe') return sendJson(res, await Spaghetti.probe());
-    if (p === '/api/spaghetti/test-notify' && req.method === 'POST') return sendJson(res, await Spaghetti.testNotify());
 
     if (p === '/api/files/config') {
       return sendJson(res, { enabled: !!CONFIG.FILE_BROWSER.enabled, writable: !!CONFIG.FILE_BROWSER.writable, label: CONFIG.FILE_BROWSER.label, root: CONFIG.FILE_BROWSER.root });
@@ -1300,8 +1574,20 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (['jog', 'setTemp'].includes(body.action) && !d.caps[body.action])
         return sendJson(res, { error: 'unsupported on this printer' }, 400);
-      try { const r = await d.action(body.action, body); return sendJson(res, { ok: true, result: r || null }); }
-      catch (e) { return sendJson(res, { ok: false, error: e.message }, 400); }
+      const who = (CONFIG.PRINTERS[i].nickname || CONFIG.PRINTERS[i].name);
+      let detail = body.action;
+      if (body.action === 'jog') detail += ' ' + (body.axis || '') + (body.dist || '');
+      else if (body.action === 'setTemp') detail += ' ' + (body.heater || '') + '=' + (body.value || 0);
+      else if (body.action === 'setSpeed') detail += ' ' + (body.pct || '') + '%';
+      else if (body.action === 'setFan') detail += ' ' + (body.fan || '') + ' ' + (body.pct || '') + '%';
+      try {
+        const r = await d.action(body.action, body);
+        Logs.add('control', body.action === 'abort' ? 'warn' : 'info', who + ': ' + detail);
+        return sendJson(res, { ok: true, result: r || null });
+      } catch (e) {
+        Logs.add('control', 'error', who + ': ' + detail + ' failed — ' + e.message);
+        return sendJson(res, { ok: false, error: e.message }, 400);
+      }
     }
 
     if ((m = p.match(/^\/api\/(\d+)\/connection$/))) {
@@ -1314,6 +1600,18 @@ const server = http.createServer(async (req, res) => {
       const d = drivers[+m[1]]; if (!d) return sendJson(res, { ok: false, reason: 'no such printer' }, 404);
       try { return sendJson(res, await d.cameraInfo()); }
       catch (e) { return sendJson(res, { ok: false, reason: e.message }); }
+    }
+
+    if ((m = p.match(/^\/api\/(\d+)\/snapshot$/))) {
+      const i = +m[1]; if (!drivers[i]) { res.writeHead(404); return res.end(); }
+      try {
+        const jpg = await snapshotFor(i);
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'Content-Length': jpg.length });
+        return res.end(jpg);
+      } catch (e) {
+        res.writeHead(503, { 'Content-Type': 'text/plain', 'X-Snapshot-Reason': String(e.message || 'unavailable').slice(0, 180) });
+        return res.end('snapshot unavailable: ' + (e.message || ''));
+      }
     }
 
     if ((m = p.match(/^\/api\/(\d+)\/stream$/))) {
@@ -1343,7 +1641,7 @@ if (require.main === module) {
     CONFIG.PRINTERS.forEach((pr, i) => console.log('   [' + i + '] ' + pr.name + '  (' + pr.driver + ')  ' + pr.ip));
     console.log('\n  Ctrl+C to stop.\n');
   });
-  Spaghetti.start();
+  Watchdogs.startAll();
 }
 
-module.exports = { MjpegHub, MoonrakerDriver, SdcpDriver, blankStatus, CONFIG, listDir, getThumb, safeResolve, Spaghetti };
+module.exports = { MjpegHub, MoonrakerDriver, SdcpDriver, blankStatus, CONFIG, listDir, getThumb, safeResolve, Watchdogs, Logs, snapshotFor, grabJpeg };

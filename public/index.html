@@ -114,12 +114,22 @@
   .rig{position:absolute;bottom:1px;width:64px;height:52px;transform:translateX(-50%);transition:left .7s ease;opacity:1}
   .forge.state-idle .rig,.forge.state-offline .rig{opacity:0}
   .rig-svg{width:100%;height:100%;display:block;overflow:visible}
-  .ham{transform-box:fill-box;transform-origin:50% 5%;transform:rotate(-48deg)}
-  .forge.state-printing .ham{animation:strike .82s cubic-bezier(.4,0,.5,1) infinite}
-  @keyframes strike{0%,30%{transform:rotate(-48deg)}48%{transform:rotate(4deg)}58%{transform:rotate(-8deg)}74%,100%{transform:rotate(-48deg)}}
-  .sp{opacity:0;fill:#ffd27a} .sp2{fill:#ffb24a} .sp3{fill:#ff9a3a}
-  .forge.state-printing .sp{animation:spark .82s infinite} .forge.state-printing .sp2{animation-delay:.03s} .forge.state-printing .sp3{animation-delay:.05s}
-  @keyframes spark{0%,44%{opacity:0}50%{opacity:1}72%,100%{opacity:0}}
+  /* hammer swung by a hand: pivot at the fist, a ~45deg arc down onto the anvil */
+  .ham{transform-box:fill-box;transform-origin:53% 22%;transform:rotate(-45deg)}
+  .forge.state-printing .ham{animation:strike .82s cubic-bezier(.5,0,.45,1) infinite}
+  @keyframes strike{0%,26%{transform:rotate(-45deg)}46%{transform:rotate(6deg)}56%{transform:rotate(-3deg)}70%,100%{transform:rotate(-45deg)}}
+  /* sparks burst outward from the impact point at the moment of the strike */
+  .sp{opacity:0;transform-box:fill-box;transform-origin:center}
+  .sp1{fill:#ffd27a;--dx:-7px;--dy:-9px} .sp2{fill:#ffb24a;--dx:5px;--dy:-12px} .sp3{fill:#ff9a3a;--dx:-2px;--dy:-13px}
+  .sp4{fill:#ffce6b;--dx:9px;--dy:-6px} .sp5{fill:#ff8a3a;--dx:-10px;--dy:-5px}
+  .forge.state-printing .sp{animation:sparkfly .82s ease-out infinite}
+  .forge.state-printing .sp2{animation-delay:.02s} .forge.state-printing .sp3{animation-delay:.04s}
+  .forge.state-printing .sp4{animation-delay:.015s} .forge.state-printing .sp5{animation-delay:.03s}
+  @keyframes sparkfly{0%,42%{opacity:0;transform:translate(0,0) scale(.5)}48%{opacity:1;transform:translate(0,0) scale(1)}100%{opacity:0;transform:translate(var(--dx,0),var(--dy,-10px)) scale(.3)}}
+  /* the live percentage rides up with the sparks on each strike */
+  .pctspark{fill:var(--ember);font:800 11px var(--mono);text-anchor:middle;opacity:0;transform-box:fill-box;transform-origin:center;paint-order:stroke;stroke:#fff7ec;stroke-width:2.4px}
+  .forge.state-printing .pctspark{animation:pctfly .82s ease-out infinite}
+  @keyframes pctfly{0%,44%{opacity:0;transform:translateY(0)}54%{opacity:1}100%{opacity:0;transform:translateY(-15px)}}
 
   .actions{display:flex;align-items:center;gap:10px;padding:11px 14px;background:#faf5ec;border-top:1px solid var(--line)}
   .fname{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
@@ -299,6 +309,17 @@
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:90;display:flex;flex-direction:column;gap:8px;align-items:center}
   .toast{background:#fff;border:1px solid var(--line-bright);color:var(--ink);padding:11px 16px;border-radius:8px;font-size:12.5px;box-shadow:0 16px 40px -16px rgba(50,30,10,.4)}
   .toast.ok{border-color:var(--sage)} .toast.err{border-color:var(--danger)}
+
+  /* ===== Logs modal ===== */
+  .logs-seg{margin-bottom:11px;flex-wrap:wrap}
+  .logtable{max-height:58vh;overflow:auto;border:1px solid var(--line-bright);border-radius:9px;background:var(--panel-2);font-family:var(--mono);font-size:11.5px}
+  .logrow{display:flex;gap:9px;padding:5px 10px;border-bottom:1px solid #00000008;align-items:baseline}
+  .logrow:last-child{border-bottom:0}
+  .logrow .lt{color:var(--ink-faint);flex:none;width:62px}
+  .logrow .lsrc{flex:none;width:54px;text-transform:uppercase;font-size:9.5px;font-weight:700;letter-spacing:.05em;color:var(--ink-dim)}
+  .logrow .lmsg{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
+  .src-obico{color:#7a59c0} .src-control{color:#b3692f} .src-ntfy{color:#2e7d8a} .src-printer{color:#5d7d36} .src-system{color:#8a7a63} .src-camera{color:#9a6a16}
+  .lv-warn .lmsg{color:#9a6a16} .lv-error .lmsg{color:var(--danger)}
   @media (max-width:560px){#grid{grid-template-columns:1fr} .nav-btn .lbl{display:none} .nav-btn{padding:9px 11px}}
 </style>
 </head>
@@ -315,6 +336,7 @@
       <button class="nav-btn on" data-view="dashboard"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg><span class="lbl">Dashboard</span></button>
       <button class="nav-btn" data-view="files"><svg viewBox="0 0 24 24" fill="none"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span class="lbl">3D&nbsp;Files</span></button>
       <button class="nav-btn" id="nav-filament"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg><span class="lbl">Filament</span></button>
+      <button class="nav-btn" id="nav-logs"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h11l3 3v13H5V4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 9h6M8 13h8M8 17h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span class="lbl">Logs</span></button>
     </nav>
   </header>
 
@@ -349,6 +371,7 @@
   <div class="overlay" id="confirm-overlay"><div class="confirm" id="confirm"></div></div>
   <div class="overlay" id="ai-overlay"><div class="modal" id="ai" style="width:min(680px,100%)"></div></div>
   <div class="overlay" id="calib-overlay"><div class="modal" id="calib" style="width:min(900px,100%)"></div></div>
+  <div class="overlay" id="logs-overlay"><div class="modal" id="logs" style="width:min(820px,100%)"></div></div>
   <div id="toast"></div>
 
 <script>
@@ -394,20 +417,33 @@
   function forgeHTML(){
     return '<div class="bar"><div class="bar-fill"></div></div>'+
       '<div class="rig"><svg class="rig-svg" viewBox="0 0 64 52">'+
+        // anvil
         '<rect x="15" y="46" width="30" height="5" rx="1.5" fill="var(--steel)"/>'+
         '<rect x="23" y="39" width="13" height="7" fill="var(--steel-d)"/>'+
         '<path d="M9 34 H40 L47 36.5 V39 H14 L9 37.5 Z" fill="var(--steel)"/>'+
         '<path d="M40 34 L53 35.5 L48 39 H40 Z" fill="var(--steel)"/>'+
         '<rect x="10" y="32.4" width="33" height="2.4" rx="1.2" fill="var(--copper)"/>'+
-        '<g class="sparks"><circle class="sp" cx="27" cy="32" r="1.3"/><circle class="sp sp2" cx="31" cy="31" r="1.1"/><circle class="sp sp3" cx="24" cy="31" r="1.1"/></g>'+
+        // sparks bursting from the impact point (~27,31)
+        '<g class="sparks">'+
+          '<circle class="sp sp1" cx="27" cy="31" r="1.3"/>'+
+          '<circle class="sp sp2" cx="30" cy="30" r="1.1"/>'+
+          '<circle class="sp sp3" cx="24" cy="30" r="1.0"/>'+
+          '<circle class="sp sp4" cx="32" cy="31" r="0.9"/>'+
+          '<circle class="sp sp5" cx="22" cy="31" r="0.9"/>'+
+        '</g>'+
+        // live percentage that rides up with the sparks
+        '<text class="pctspark" x="27" y="25">0%</text>'+
+        // hammer, gripped + swung by a hand
         '<g class="ham">'+
-          '<rect x="24.5" y="3" width="5" height="24" rx="2.2" fill="var(--wood)"/>'+
-          '<rect x="13" y="23" width="28" height="11" rx="2.6" fill="var(--copper)"/>'+
-          '<rect x="13" y="29.6" width="28" height="4.4" rx="2.1" fill="var(--copper-deep)"/>'+
+          '<rect x="35" y="-3" width="6.5" height="14" rx="3.2" fill="#caa176" transform="rotate(30 38 4)"/>'+   // forearm
+          '<circle cx="29" cy="6" r="4.4" fill="#caa176"/><circle cx="29" cy="6" r="4.4" fill="none" stroke="#00000018" stroke-width="1"/>'+ // fist
+          '<rect x="24.5" y="5" width="5" height="23" rx="2.2" fill="var(--wood)"/>'+   // handle
+          '<rect x="13" y="22" width="28" height="11" rx="2.6" fill="var(--copper)"/>'+   // head
+          '<rect x="13" y="28.6" width="28" height="4.4" rx="2.1" fill="var(--copper-deep)"/>'+
         '</g>'+
       '</svg></div>';
   }
-  function setForge(c,state,pct){c.forge.className='forge state-'+state;c.forgeFill.style.width=(pct||0)+'%';c.rig.style.left=(pct||0)+'%';}
+  function setForge(c,state,pct){c.forge.className='forge state-'+state;c.forgeFill.style.width=(pct||0)+'%';c.rig.style.left=(pct||0)+'%';if(c.pctSpark)c.pctSpark.textContent=Math.round(pct||0)+'%';}
 
   function buildCard(p){
     var card=el('div','card');
@@ -441,15 +477,16 @@
     var fsBtn=elH('button','icon-btn','<svg viewBox="0 0 24 24" fill="none"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>');fsBtn.title='Fullscreen';
     var ctrlBtn=el('button','btn ghost','Controls');
     var abortBtn=el('button','btn-abort','Abort');
-    var spag=null;
-    if(p.driver==='moonraker'){spag=elH('button','spag off','<span class="d"></span><span class="t">AI</span>');spag.type='button';spag.title='AI spaghetti watchdog';}
-    actions.appendChild(fname);actions.appendChild(fsBtn);actions.appendChild(ctrlBtn);if(spag)actions.appendChild(spag);actions.appendChild(abortBtn);
+    // Both printers get an AI watchdog pill now (the Anvil watches via this server's
+    // snapshot proxy; the Forge via Moonraker's native snapshot).
+    var spag=elH('button','spag off','<span class="d"></span><span class="t">AI</span>');spag.type='button';spag.title='AI spaghetti watchdog';
+    actions.appendChild(fname);actions.appendChild(fsBtn);actions.appendChild(ctrlBtn);actions.appendChild(spag);actions.appendChild(abortBtn);
 
     card.appendChild(frame);card.appendChild(forge);card.appendChild(actions);grid.appendChild(card);
 
     var refs={el:card,img:img,nosig:nosig,frame:frame,alarmTag:alarmTag,badge:badge,badgeLbl:badge.querySelector('.lbl'),pctN:pct.querySelector('.n'),
       temps:temps,sC:sC.querySelector('.v'),
-      lay:mr.querySelector('.lay'),eta:mr.querySelector('.eta'),forge:forge,forgeFill:forge.querySelector('.bar-fill'),rig:forge.querySelector('.rig'),
+      lay:mr.querySelector('.lay'),eta:mr.querySelector('.eta'),forge:forge,forgeFill:forge.querySelector('.bar-fill'),rig:forge.querySelector('.rig'),pctSpark:forge.querySelector('.pctspark'),
       fname:fname,abortBtn:abortBtn,spag:spag,spagT:spag?spag.querySelector('.t'):null,retry:null};
     cards[p.id]=refs;
 
@@ -463,7 +500,7 @@
     fsClose.addEventListener('click',exitFull);
     ctrlBtn.addEventListener('click',function(){openModal(p.id);});
     abortBtn.addEventListener('click',function(){confirmAbort(p.id);});
-    if(spag)spag.addEventListener('click',function(){openAi();});
+    if(spag)spag.addEventListener('click',function(){openAi(p.id);});
     connect(p.id);
   }
   function connect(id){var c=cards[id];if(!c)return;c.nosig.classList.remove('show');clearTimeout(c.retry);c.img.src=streamSrc(id);}
@@ -499,8 +536,9 @@
     return h;
   }
 
-  /* ===== AI watchdog: pill + alarm border + notifications ===== */
-  var aiState=null, spagPrev=null, titleBlink=null, origTitle=document.title;
+  /* ===== AI watchdog: pill + alarm border + notifications (per printer) ===== */
+  var aiState=null, aiPrinter=null, spagPrev={}, titleBlink=null, origTitle=document.title;
+  function spagBase(){return '/api/'+(aiPrinter==null?0:aiPrinter)+'/spaghetti';}
   function aiVisible(){var o=document.getElementById('ai-overlay');return !!(o&&o.classList.contains('show'));}
   function statusClass(s){return (s==='watching')?'ok':(s==='warning'||s==='tripped'||s==='grace')?'warn':(s==='alert'||s==='acted'||s==='error')?'bad':'dim';}
   function browserNotifyOn(){return ('Notification' in window)&&localStorage.getItem('spagBrowserNotify')==='1'&&Notification.permission==='granted';}
@@ -509,16 +547,16 @@
   function startTitleBlink(msg){stopTitleBlink();var on=false;titleBlink=setInterval(function(){document.title=on?origTitle:msg;on=!on;},900);}
   function stopTitleBlink(){if(titleBlink){clearInterval(titleBlink);titleBlink=null;document.title=origTitle;}}
   function fireBrowserAlert(st){
-    var acted=(st.status==='acted');
-    var title=acted?'Print cancelled \u2014 The Forge':'\u26a0 Possible print failure \u2014 The Forge';
+    var acted=(st.status==='acted'),who=st.printerName||('Printer '+st.printerIndex);
+    var title=acted?('Print cancelled \u2014 '+who):('\u26a0 Possible print failure \u2014 '+who);
     var body=acted?'Spaghetti detected; the print was auto-cancelled.':'Spaghetti detected. Open the console and stop the print.';
-    if(browserNotifyOn()){try{var n=new Notification(title,{body:body,tag:'spag-forge'});n.onclick=function(){window.focus();try{n.close();}catch(e){}};}catch(e){}}
+    if(browserNotifyOn()){try{var n=new Notification(title,{body:body,tag:'spag-'+st.printerIndex});n.onclick=function(){window.focus();try{n.close();}catch(e){}};}catch(e){}}
     if(soundOn())beep(acted?2:3);
-    startTitleBlink(acted?'\u2717 Forge cancelled':'\u26a0 Forge \u2014 check print');
+    startTitleBlink(acted?('\u2717 '+who+' cancelled'):('\u26a0 '+who+' \u2014 check print'));
   }
   function renderSpag(st){
     if(!st||st.printerIndex==null)return;
-    aiState=st; if(aiVisible())updateAiStatus(st);
+    if(aiVisible()&&aiPrinter===st.printerIndex){aiState=st;updateAiStatus(st);}
     var c=cards[st.printerIndex];
     if(c){
       if(c.spag){
@@ -540,18 +578,20 @@
       if(c.frame)c.frame.classList.toggle('alarm',alarm);
       if(c.alarmTag)c.alarmTag.textContent=(st.status==='acted')?'\u2717 Print cancelled':'\u26a0 Failure \u2014 stop print';
     }
-    var nowAlarm=(st.status==='alert'||st.status==='acted'),wasAlarm=(spagPrev==='alert'||spagPrev==='acted');
+    var prev=spagPrev[st.printerIndex];
+    var nowAlarm=(st.status==='alert'||st.status==='acted'),wasAlarm=(prev==='alert'||prev==='acted');
     if(nowAlarm&&!wasAlarm)fireBrowserAlert(st);
-    if(!nowAlarm&&wasAlarm)stopTitleBlink();
-    spagPrev=st.status;
+    if(!nowAlarm&&wasAlarm&&!anyAlarm())stopTitleBlink();
+    spagPrev[st.printerIndex]=st.status;
   }
-  function pollSpag(){getJSON('/api/spaghetti').then(renderSpag).catch(function(){});}
+  function anyAlarm(){return Object.keys(spagPrev).some(function(k){return spagPrev[k]==='alert'||spagPrev[k]==='acted';});}
+  function pollSpag(){getJSON('/api/spaghetti').then(function(d){(d&&d.watchers||[]).forEach(renderSpag);}).catch(function(){});}
 
   /* ===== AI settings modal ===== */
   function modeDesc(m){return ({off:'Watchdog is off. The camera is not analyzed.',notify:'Watches for failures and alerts you (browser + phone) but NEVER cancels \u2014 you decide and hit Abort.',act:'Watches for failures and AUTO-CANCELS the print (same as Abort) once confirmed.',schedule:'Auto-cancels during the night window below; outside it, only alerts you.'})[m]||'';}
-  function openAi(){document.getElementById('ai-overlay').classList.add('show');getJSON('/api/spaghetti').then(function(st){aiState=st;renderAi();}).catch(function(){renderAi();});}
+  function openAi(id){aiPrinter=(id==null?0:id);document.getElementById('ai-overlay').classList.add('show');getJSON(spagBase()).then(function(st){aiState=st;renderAi();}).catch(function(){renderAi();});}
   function closeAi(){hide('ai-overlay');}
-  function aiSave(patch){return post('/api/spaghetti/settings',patch).then(function(r){if(r&&r.state){aiState=r.state;}renderAi();return r;});}
+  function aiSave(patch){return post(spagBase()+'/settings',patch).then(function(r){if(r&&r.state){aiState=r.state;}renderAi();return r;});}
   function updateAiStatus(st){var e=document.getElementById('ai-status');if(!e)return;e.className='ai-status '+statusClass(st.status);var eff=(st.mode==='schedule')?(' \u2014 now: '+(st.inActWindow?'AUTO-CANCEL (night)':'notify (day)')):'';var sc=(typeof st.lastScore==='number'&&st.status!=='disabled')?(' \u00b7 score '+st.lastScore):'';e.innerHTML='<span class="d"></span><span><b>'+(st.message||'')+'</b>'+eff+sc+'</span>';}
   function renderAi(){
     var st=aiState||{mode:'notify',status:'idle',schedule:{actStart:'22:00',actEnd:'07:00'},thresholds:{},ignoreZones:[],notify:{}};
@@ -559,14 +599,14 @@
     var seg='';modes.forEach(function(x){seg+='<button data-mode="'+x+'" class="'+(st.mode===x?'on':'')+'">'+lbl[x]+'</button>';});
     var bn=browserNotifyOn(),snd=soundOn(),th=st.thresholds||{},zones=st.ignoreZones||[];
     var zhtml=zones.length?zones.map(function(z,i){return '<div class="zitem">#'+(i+1)+' &nbsp; center ('+Math.round(z[0])+', '+Math.round(z[1])+') &nbsp; size '+Math.round(z[2])+'\u00d7'+Math.round(z[3])+'<button class="x" data-zi="'+i+'">\u00d7</button></div>';}).join(''):'<div class="muted">No dead zones. Use Calibrate to mask rails, the drag chain, or reflections that fool the model.</div>';
-    var snap=st.snapshotUrl||'',hasSnap=snap.indexOf('http')===0;
+    var snap=st.snapshotUrl||'',hasSnap=(snap.indexOf('http')===0||snap.indexOf('/')===0);
     var zoneBody=hasSnap
       ?'<div class="calibwrap zoneprev" id="ai-zwrap"><img id="ai-zimg" src="'+snap+(snap.indexOf('?')>=0?'&':'?')+'t='+Date.now()+'"><svg id="ai-zsvg" preserveAspectRatio="none"></svg></div>'
       :'<div class="zlist" id="ai-zones">'+zhtml+'</div>';
     var sup=(st.mlConfigured===false)?'<div class="modedesc" style="color:var(--danger)">CONFIG.SPAGHETTI.mlApi isn\u2019t set yet \u2014 the model can\u2019t be reached.</div>':'';
     var schedSec=(st.mode==='schedule')?('<div class="section"><h4>Night window (auto-cancel)</h4><div class="row">Auto-cancel from <input type="time" class="timein" id="ai-actstart" value="'+(st.schedule.actStart||'22:00')+'"> to <input type="time" class="timein" id="ai-actend" value="'+(st.schedule.actEnd||'07:00')+'"></div><div class="modedesc">Outside these hours it only alerts you so you can decide.</div></div>'):'';
     document.getElementById('ai').innerHTML=''+
-      '<div class="modal-head"><div><div class="t">AI Spaghetti Watchdog</div><div class="sub">The Forge</div></div><button class="close" id="ai-close">\u00d7</button></div>'+
+      '<div class="modal-head"><div><div class="t">AI Spaghetti Watchdog</div><div class="sub">'+((st.printerName||'Printer')+(st.snapshotReady===false?' \u2014 set SELF_BASE_URL to enable':''))+'</div></div><button class="close" id="ai-close">\u00d7</button></div>'+
       '<div class="modal-body">'+
         '<div class="ai-status '+statusClass(st.status)+'" id="ai-status"></div>'+
         '<div class="section"><h4>Mode</h4><div class="seg" id="ai-mode">'+seg+'</div><div class="modedesc">'+modeDesc(st.mode)+'</div>'+sup+'</div>'+
@@ -602,7 +642,7 @@
     var ntop=document.getElementById('ai-ntfytopic');
     if(ntop){ntop.value=(st.notify&&st.notify.ntfyTopic)||'';ntop.onchange=function(){aiSave({notify:{ntfyTopic:ntop.value.trim()}});};}
     document.getElementById('ai-test').onclick=function(){var t=ntop?ntop.value.trim():'';
-      post('/api/spaghetti/settings',{notify:{ntfyTopic:t,ntfy:true}}).then(function(r){if(r&&r.state)aiState=r.state;return post('/api/spaghetti/test-notify',{});}).then(function(r){toast((r&&r.ok)?'Test sent — check your phone':('Test failed: '+((r&&r.reason)||'enter a topic URL first')),(r&&r.ok)?'ok':'err');renderAi();});};
+      post(spagBase()+'/settings',{notify:{ntfyTopic:t,ntfy:true}}).then(function(r){if(r&&r.state)aiState=r.state;return post(spagBase()+'/test-notify',{});}).then(function(r){toast((r&&r.ok)?'Test sent — check your phone':('Test failed: '+((r&&r.reason)||'enter a topic URL first')),(r&&r.ok)?'ok':'err');renderAi();});};
     var trips=document.getElementById('ai-trips'),fst=document.getElementById('ai-fst'),hc=document.getElementById('ai-hc');
     function saveTh(){aiSave({thresholds:{consecutiveTrips:+trips.value,frameScoreTrip:+fst.value,highConf:+hc.value}});}
     [trips,fst,hc].forEach(function(inp){if(inp)inp.onchange=saveTh;});
@@ -613,7 +653,7 @@
     var zc=document.getElementById('ai-zclear');if(zc)zc.onclick=function(){aiSave({ignoreZones:[]});};
     document.getElementById('ai-calib').onclick=openCalib;
     document.getElementById('ai-stop').onclick=function(){var id=aiState?aiState.printerIndex:null;if(id==null)return;closeAi();confirmAbort(id);};
-    document.getElementById('ai-reset').onclick=function(){post('/api/spaghetti/reset',{}).then(function(r){if(r&&r.state)aiState=r.state;toast('Alert reset','ok');renderAi();});};
+    document.getElementById('ai-reset').onclick=function(){post(spagBase()+'/reset',{}).then(function(r){if(r&&r.state)aiState=r.state;toast('Alert reset','ok');renderAi();});};
   }
   /* Draw the saved dead zones onto the live snapshot in the AI menu (read-only + hover tooltips). */
   function drawAiZones(){
@@ -641,12 +681,13 @@
   var calibZones=[],calibDets=[],calibDrag=null;
   function openCalib(){document.getElementById('calib-overlay').classList.add('show');renderCalibShell('',null,true);loadCalib();}
   function closeCalib(){hide('calib-overlay');}
-  function loadCalib(){getJSON('/api/spaghetti/probe').then(function(d){calibZones=(d.ignoreZones||[]).map(function(z){return z.slice(0,4).map(Number);});calibDets=(d.ok&&Array.isArray(d.detections))?d.detections:[];renderCalibShell(d.snapshotUrl||'',d.ok?null:(d.reason||'model unavailable'));}).catch(function(){renderCalibShell('','probe failed');});}
+  function loadCalib(){getJSON(spagBase()+'/probe').then(function(d){calibZones=(d.ignoreZones||[]).map(function(z){return z.slice(0,4).map(Number);});calibDets=(d.ok&&Array.isArray(d.detections))?d.detections:[];renderCalibShell(d.snapshotUrl||'',d.ok?null:(d.reason||'model unavailable'));}).catch(function(){renderCalibShell('','probe failed');});}
   function svgPt(svg,evt){var pt=svg.createSVGPoint();pt.x=evt.clientX;pt.y=evt.clientY;var ctm=svg.getScreenCTM();if(!ctm)return{x:0,y:0};var p=pt.matrixTransform(ctm.inverse());return{x:p.x,y:p.y};}
   function renderCalibShell(snapUrl,warn,loading){
-    var hasImg=snapUrl&&snapUrl.indexOf('http')===0;
+    var hasImg=snapUrl&&(snapUrl.indexOf('http')===0||snapUrl.indexOf('/')===0);
+    var who=(aiState&&aiState.printerName)||'Printer';
     document.getElementById('calib').innerHTML=''+
-      '<div class="modal-head"><div><div class="t">Calibrate dead zones</div><div class="sub">The Forge camera</div></div><button class="btn" id="cb-rescan">Re-scan</button><button class="close" id="cb-close">\u00d7</button></div>'+
+      '<div class="modal-head"><div><div class="t">Calibrate dead zones</div><div class="sub">'+who+' camera</div></div><button class="btn" id="cb-rescan">Re-scan</button><button class="close" id="cb-close">\u00d7</button></div>'+
       '<div class="modal-body">'+
         '<div class="modedesc" style="margin-bottom:11px">Drag on the image to box-out anything that falsely trips the model (rails, drag chain, reflections). <span style="color:var(--danger)">Red</span> = live detections, <span style="color:var(--sage)">green dashed</span> = your dead zones; tap a white \u00d7 to remove one.'+(warn?(' <span style="color:var(--danger)">'+warn+'</span>'):'')+'</div>'+
         '<div class="calibwrap" id="cb-wrap">'+(loading?'<div class="calib-empty">Loading snapshot\u2026</div>':(hasImg?('<img id="cb-img" src="'+snapUrl+(snapUrl.indexOf('?')>=0?'&':'?')+'t='+Date.now()+'"><svg id="cb-svg" preserveAspectRatio="none"></svg>'):('<div class="calib-empty">'+(warn||'No snapshot URL configured in CONFIG')+'</div>')))+'</div>'+
@@ -674,7 +715,7 @@
     var cnt=document.getElementById('cb-count');if(cnt)cnt.textContent=calibZones.length+' zone'+(calibZones.length===1?'':'s')+' \u00b7 '+calibDets.length+' detection'+(calibDets.length===1?'':'s')+' now';
     [].forEach.call(svg.querySelectorAll('.calib-zx'),function(c){c.onpointerdown=function(e){e.stopPropagation();e.preventDefault();calibZones.splice(+c.getAttribute('data-zi'),1);drawCalib();};});
   }
-  function aiSaveZones(zones){post('/api/spaghetti/settings',{ignoreZones:zones}).then(function(r){if(r&&r.state)aiState=r.state;toast('Saved '+zones.length+' dead zone'+(zones.length===1?'':'s'),'ok');if(aiVisible())renderAi();});}
+  function aiSaveZones(zones){post(spagBase()+'/settings',{ignoreZones:zones}).then(function(r){if(r&&r.state)aiState=r.state;toast('Saved '+zones.length+' dead zone'+(zones.length===1?'':'s'),'ok');if(aiVisible())renderAi();});}
 
   /* ---- generic dialogs ---- */
   function confirmBox(o){return new Promise(function(res){
@@ -885,20 +926,52 @@
       '</div>';
     document.getElementById('fil-close').onclick=function(){hide('filament-overlay');};show('filament-overlay');}
 
+  /* ---- master logs modal ---- */
+  var logsTimer=null, logSource='all';
+  function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function openLogs(){show('logs-overlay');renderLogsShell();loadLogs();clearInterval(logsTimer);logsTimer=setInterval(loadLogs,2500);}
+  function closeLogs(){hide('logs-overlay');clearInterval(logsTimer);logsTimer=null;}
+  function renderLogsShell(){
+    var sources=[['all','All'],['obico','AI'],['control','Control'],['ntfy','ntfy'],['printer','Printers'],['system','System']];
+    var seg=sources.map(function(s){return '<button data-src="'+s[0]+'" class="'+(logSource===s[0]?'on':'')+'">'+s[1]+'</button>';}).join('');
+    document.getElementById('logs').innerHTML=''+
+      '<div class="modal-head"><div><div class="t">Logs</div><div class="sub">Obico · Forge Control · printers · notifications</div></div><button class="close" id="logs-close">×</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="seg logs-seg" id="logs-seg">'+seg+'</div>'+
+        '<div class="logtable" id="logs-list"><div class="empty">Loading…</div></div>'+
+        '<div class="row" style="margin-top:11px"><div class="muted" style="flex:1">Live · newest at the bottom · updates every 2.5s</div><button class="btn ghost" id="logs-done">Done</button></div>'+
+      '</div>';
+    document.getElementById('logs-close').onclick=closeLogs;
+    document.getElementById('logs-done').onclick=closeLogs;
+    document.getElementById('logs-seg').onclick=function(e){var b=e.target.closest('button[data-src]');if(!b)return;logSource=b.dataset.src;renderLogsShell();loadLogs();};
+  }
+  function loadLogs(){if(!document.getElementById('logs-list'))return;getJSON('/api/logs?limit=400'+(logSource!=='all'?'&source='+encodeURIComponent(logSource):'')).then(renderLogs).catch(function(){});}
+  function renderLogs(d){
+    var box=document.getElementById('logs-list');if(!box)return;
+    var rows=(d&&d.entries)||[];
+    if(!rows.length){box.innerHTML='<div class="empty">No log entries'+(logSource!=='all'?' for this source':'')+' yet.</div>';return;}
+    var atBottom=(box.scrollTop+box.clientHeight>=box.scrollHeight-30);
+    box.innerHTML=rows.map(function(e){
+      var ts=new Date(e.t).toLocaleTimeString();
+      return '<div class="logrow lv-'+e.level+'"><span class="lt">'+ts+'</span><span class="lsrc src-'+e.source+'">'+escapeHtml(e.source)+'</span><span class="lmsg">'+escapeHtml(e.message)+'</span></div>';
+    }).join('');
+    if(atBottom)box.scrollTop=box.scrollHeight;
+  }
+
   /* ---- views + wiring ---- */
   function showView(v){document.querySelectorAll('.view').forEach(function(x){x.classList.remove('on');});document.getElementById('view-'+v).classList.add('on');
     document.querySelectorAll('.nav-btn[data-view]').forEach(function(b){b.classList.toggle('on',b.dataset.view===v);});
     document.getElementById('tb-dashboard').style.display=v==='dashboard'?'flex':'none';
     document.getElementById('tb-files').style.display=v==='files'?'flex':'none';
     if(v==='files'&&!filesInit){filesInit=true;getJSON('/api/files/config').then(function(cfg){filesWritable=!!cfg.writable;document.getElementById('files-newfolder').style.display=filesWritable?'inline-flex':'none';}).catch(function(){});loadFiles('');}}
-  document.getElementById('nav').addEventListener('click',function(e){var b=e.target.closest('.nav-btn');if(!b)return;if(b.id==='nav-filament'){openFilament();return;}if(b.dataset.view)showView(b.dataset.view);});
+  document.getElementById('nav').addEventListener('click',function(e){var b=e.target.closest('.nav-btn');if(!b)return;if(b.id==='nav-filament'){openFilament();return;}if(b.id==='nav-logs'){openLogs();return;}if(b.dataset.view)showView(b.dataset.view);});
   document.getElementById('cols').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;[].forEach.call(this.children,function(x){x.classList.remove('on');});b.classList.add('on');grid.className=b.dataset.cols==='auto'?'':('cols-'+b.dataset.cols);});
   document.getElementById('reconnect-all').addEventListener('click',function(){Object.keys(cards).forEach(connect);});
   document.getElementById('files-refresh').addEventListener('click',function(){loadFiles(filesCwd);});
   document.getElementById('files-search').addEventListener('input',drawTiles);
   document.getElementById('files-newfolder').addEventListener('click',function(){promptText({title:'New folder',desc:'Created in '+(filesCwd?filesCwd:'3D Files'),placeholder:'Folder name',okText:'Create'}).then(function(name){if(!name)return;post('/api/files/mkdir',{path:filesCwd,name:name}).then(function(r){if(r.ok){toast('Folder created','ok');loadFiles(filesCwd);}else toast(r.error||'Could not create folder','err');});});});
-  ['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib'].forEach(function(n){document.getElementById(n+'-overlay').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib'].forEach(function(n){hide(n+'-overlay');});}});
+  ['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs'].forEach(function(n){document.getElementById(n+'-overlay').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){if(logsTimer){clearInterval(logsTimer);logsTimer=null;}['modal','filament','preview','sheet','picker','prompt','confirm','ai','calib','logs'].forEach(function(n){hide(n+'-overlay');});}});
 
   getJSON('/api/printers').then(function(list){document.getElementById('total-count').textContent=list.length;
     list.forEach(function(p){printers[p.id]=p;buildCard(p);});pollAll();setInterval(pollAll,1500);pollSpag();setInterval(pollSpag,2000);

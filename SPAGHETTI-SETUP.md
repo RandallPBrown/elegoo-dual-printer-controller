@@ -1,12 +1,28 @@
 # AI spaghetti watchdog — setup & usage
 
-The watchdog lives **inside `server.js`**. While the Giga prints it scores the camera
+The watchdog lives **inside `server.js`**. While a printer prints it scores the camera
 snapshot through a self-hosted Obico ML API and, depending on **mode**, alerts you and/or
-cancels the print. Everything is driven from the **AI pill** on the Forge's card (next to
-Abort) — tap it to open the settings panel.
+cancels the print. Everything is driven from the **AI pill** on each printer's card (next
+to Abort) — tap it to open that printer's settings panel.
+
+**Both printers can be watched at once.** There is now **one independent watchdog per
+printer** — the Forge (OrangeStorm Giga, Moonraker) *and* the Anvil (Centauri Carbon,
+SDCP). Each has its own mode, sensitivity, dead zones and state, and each alert names the
+printer that's failing and carries a **photo of that printer** plus a one-tap **Abort**
+button (see *Phone alerts with a photo + remote Abort* below). The Forge ships in
+**Notify** as before; the **Anvil ships `off`** so nothing arms unexpectedly — open its AI
+pill and switch it to Notify/Auto/Schedule when you're ready.
 
 You only have to do one new thing to turn it on: **stand up the ML API container** and
 point the console at it.
+
+> **The Anvil needs one extra setting.** The Centauri (SDCP) has no direct snapshot URL
+> the way the Giga does, so the console exposes the frame itself at
+> `/<console>/api/0/snapshot` (it grabs a still off the shared camera hub, so it never
+> knocks out the live feed). For the ML API to fetch that, set **`CONFIG.SELF_BASE_URL`**
+> (or the `SELF_BASE_URL` env var) to the address the ML API box can reach the console at,
+> e.g. `http://192.168.10.50:8080`. Until that's set the Anvil's pill says
+> *"set SELF_BASE_URL to enable."* The Giga needs nothing extra.
 
 ---
 
@@ -69,7 +85,27 @@ just pings you so you can decide; overnight while you're asleep it cancels on it
   (e.g. `https://ntfy.sh/my-forge-alerts`), install the free ntfy app, subscribe to that
   exact topic, then hit **Send test**. This fires from the **server**, so it reaches your
   phone even when no browser tab is open anywhere — and alerts now carry a title, a high/
-  urgent priority, and a ⚠️ icon so they stand out on your lock screen.
+  urgent priority, and a ⚠️ icon so they stand out on your lock screen. The topic is
+  **per printer** (each watchdog has its own), so you can route the Forge and the Anvil to
+  the same topic or to different ones.
+
+### Phone alerts with a photo + remote Abort
+Every failure alert now includes:
+- **A fresh photo of the failing printer** (a JPEG grabbed at the moment of the alert),
+  so you can glance at your lock screen and judge whether it's a real fail.
+- **The printer's name** in the title (e.g. *"Failure detected — The Anvil"*), so you
+  always know *which* machine tripped.
+- **Action buttons** — **Abort print** (cancels that exact printer, the same call as the
+  Abort button) and **Open console**. These need your phone to be able to reach the
+  console's web address, so they only appear when **`CONFIG.SELF_BASE_URL`** is set to a
+  phone-reachable URL (a public URL / port-forward, a VPN/Tailscale address, etc.). The
+  **Send test** button also pushes a photo + buttons so you can confirm the whole pipeline.
+
+  > **Security note:** if `SELF_BASE_URL` is a public URL, the `/api/<id>/action` endpoint
+  > the Abort button posts to is **unauthenticated** — anyone with the notification (or the
+  > URL) could cancel a print. Put the console behind a VPN or a reverse proxy with auth if
+  > that matters to you. Leave `SELF_BASE_URL` unset and alerts still arrive with the photo,
+  > just without the one-tap Abort button.
 - **Browser** — a Chrome pop-up + the affected feed gets a pulsing **red border** and the
   tab title flashes. *Important limitation:* the browser's Notification API only works in a
   "secure context" — that means **on the server PC itself** (`localhost`) or over **HTTPS**.
@@ -120,11 +156,28 @@ If a zone is missed or misnamed, hard-set the names in the Giga's CONFIG block
 (`extruders` / `bedHeaters`).
 
 ## Endpoints (for reference)
-- `GET /api/spaghetti` — current state (the pill polls this)
-- `POST /api/spaghetti/settings` — `{mode, schedule, thresholds, ignoreZones, notify}`
-- `POST /api/spaghetti/reset` — clear an alert
-- `GET /api/spaghetti/probe` — snapshot + raw detections (used by Calibrate)
-- `POST /api/spaghetti/test-notify` — fire a test ntfy push
+The watchdog routes are **per printer** now (`<id>` is the printer index — `0` = Anvil,
+`1` = Forge):
+- `GET /api/spaghetti` — **aggregate** state for all printers: `{ watchers: [ … ] }` (the
+  pills poll this)
+- `GET /api/<id>/spaghetti` — one printer's state
+- `POST /api/<id>/spaghetti/settings` — `{mode, schedule, thresholds, ignoreZones, notify}`
+- `POST /api/<id>/spaghetti/reset` — clear that printer's alert
+- `GET /api/<id>/spaghetti/probe` — snapshot + raw detections (used by Calibrate)
+- `POST /api/<id>/spaghetti/test-notify` — fire a test ntfy push (with photo + buttons)
+- `GET /api/<id>/snapshot` — a single fresh JPEG still from that printer's camera
+- the old un-indexed `/api/spaghetti/*` routes still work and target the Giga.
 
-Auto-cancel always reuses the Giga's existing Moonraker cancel — the **same** call as the
-Abort button. It never sends M112, and it never cancels on an error or a stale frame.
+Settings persist to `spaghetti.settings.json` as `{ "byPrinter": { "0": {…}, "1": {…} } }`
+(an older single-watchdog file is migrated onto the Giga automatically).
+
+Auto-cancel always reuses that printer's existing cancel — the **same** call as the Abort
+button. It never sends M112, and it never cancels on an error or a stale frame.
+
+## Master Logs (header → Logs)
+The **Logs** button in the header opens a live, filterable feed that aggregates everything
+the console sees: **AI** watchdog activity (trips/alerts/auto-cancels), **Control** actions
+(pause/resume/abort/jog/temps/fans/speed on either printer), **ntfy** pushes, **printer**
+connection notes, and **system** output. It polls `GET /api/logs` every 2.5s; filter by
+source with the chips at the top. It's an in-memory ring buffer (newest at the bottom), so
+it resets when the server restarts — it's for "what just happened?", not long-term history.
